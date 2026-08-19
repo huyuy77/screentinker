@@ -953,6 +953,26 @@ app.get('/api/content/:id/thumbnail', (req, res) => {
 // req.isPlatformAdmin, req.actingAs. Route handlers in 2.1 don't read these
 // yet (they still filter by user_id); 2.2 will migrate them one route at a time.
 const { requireAuth } = require('./middleware/auth');
+
+/*
+ * ⚠️ THE HUB API EXISTS ONLY WHEN THIS NODE IS A HUB. Mounted behind MESH_ACCEPT_ENROLLMENT, so an
+ * ordinary install has no /api/mesh routes at all — not routes that 404 on empty tables, but no
+ * routes. Same reasoning as the /mesh socket namespace: "a user who never sets the flag cannot tell
+ * the mesh exists" is only true if there is nothing to discover.
+ *
+ * It is READ-ONLY by construction. There is no write route here because 2.0 has no downward channel
+ * to write over (I2) — the absence of a mechanism, not restraint being exercised.
+ */
+if (require('./config').meshAcceptEnrollment) {
+  try {
+    app.use('/api/mesh',
+      require('./routes/mesh')(require('./db/database').db, { requireAuth }));
+    console.log('[mesh] hub API mounted at /api/mesh');
+  } catch (e) {
+    // Never a reason to fail a boot — the node's own job is unaffected by its observer role (I1).
+    console.warn(`[mesh] hub API not mounted: ${e && e.message}`);
+  }
+}
 const { sixDigitCode } = require('./lib/numeric-code');
 const { resolveTenancy, accessContext } = require('./lib/tenancy');
 // Public API token front door (Phase 1). Attached ONLY to the public routers below.
