@@ -38,6 +38,37 @@ module.exports = {
   // managed panels). Per-device override lives on devices.ota_enabled; the app additionally
   // stands down on its own when a foreign device owner (MDM) manages it.
   otaEnabled: process.env.OTA_ENABLED !== 'false',
+
+  /* ==========================================================================================
+   * MESH (2.0) — off by default and INVISIBLE.
+   *
+   * ⚠️ Both flags default to off, and with them off there is no new UI, no new route, no background
+   * work and no schema behaviour. A user who never sets them must not be able to tell the mesh
+   * exists. That is a stated guarantee of the directive, not an implementation detail — the Phase 0
+   * schema is empty tables precisely so this holds.
+   *
+   * TWO FLAGS, NOT ONE, because accepting observation and becoming an observer are different risks
+   * with different blast radii. A node that accepts enrollments is exposing its own data upward on
+   * someone else's request; a node that enrols upward is choosing to report. An operator may well
+   * want one and not the other, and a single flag would force them to take both.
+   * ========================================================================================== */
+
+  // May this node mint pairing codes and accept children? Required to act as hub/proxy/relay/sink.
+  meshAcceptEnrollment: ['1', 'true', 'yes'].includes(
+    String(process.env.MESH_ACCEPT_ENROLLMENT || '').toLowerCase()),
+
+  // May this node enrol upward to a parent?
+  meshAllowUplink: ['1', 'true', 'yes'].includes(
+    String(process.env.MESH_ALLOW_UPLINK || '').toLowerCase()),
+
+  // Runtime depth cap. ⚠️ Stays at 2 until Phase 4: two tiers must run against real hardware before
+  // multi-hop relay, deep clock skew and aggregate fidelity are anything but theory.
+  meshMaxDepth: parseInt(process.env.MESH_MAX_DEPTH) || 2,
+
+  // Oldest peer this node will form an edge with. 2.0.0 because no earlier build can speak mesh at
+  // all — see server/lib/mesh/node-identity.js for why a floor has to exist at all.
+  meshMinNodeVersion: process.env.MESH_MIN_NODE_VERSION || '2.0.0',
+
   // App-level heartbeat. Checker runs every heartbeatInterval and marks
   // devices offline if last_heartbeat is older than heartbeatTimeout.
   // Env override for self-hosters on slow/jittery networks (issue #3:

@@ -663,6 +663,109 @@ const migrations = [
      last_seen INTEGER NOT NULL
    )`,
 
+
+  /* ==========================================================================================
+   * MESH — Phase 0 schema. Tables only; no behavior, no UI, no background work.
+   *
+   * ⚠️ THIS MIGRATION IS A NO-OP FOR EVERY EXISTING INSTALL. Creating empty tables changes nothing
+   * an operator can observe: with MESH_ACCEPT_ENROLLMENT and MESH_ALLOW_UPLINK both off (the
+   * defaults) nothing reads them. Note these are CREATE TABLE, which the loop below deliberately
+   * does NOT count as an applied migration — only ADD COLUMN does — so a healthy boot stays silent
+   * rather than announcing work it did not do.
+   *
+   * See docs/mesh-directive.md and docs/mesh-phase0-design.md.
+   * ========================================================================================== */
+
+  /* This node's own identity. Exactly one row, enforced by the CHECK rather than by convention.
+   * ⚠️ Generated locally at first boot and never registered anywhere (I7). No path, no parent, no
+   * role encoded in it (I4) — re-parenting must not invalidate history. */
+  `CREATE TABLE IF NOT EXISTS mesh_node (
+     singleton      INTEGER PRIMARY KEY CHECK (singleton = 1),
+     node_id        TEXT    NOT NULL UNIQUE,
+     created_at     INTEGER NOT NULL,
+     -- #288: this box may also be one of its own screens. Recorded explicitly so rollups do not
+     -- count the host as both a node and a device and report one screen too many, forever.
+     self_device_id TEXT
+   )`,
+
+  /* Edges. ⚠️ A TABLE, NOT A parent_id COLUMN — a node has N edges.
+   *
+   * A parent pointer forecloses multi-parent, which two real cases need: an MSP hub observing a
+   * client's server WHILE the client's own hub also observes it, and hub migration, which needs
+   * both edges to exist at once for a while. Adding the second parent later would be a schema
+   * change under live data; allowing it now costs one table.
+   *
+   * `direction` is my relationship to the peer (is it above or below me). `transport_direction` is
+   * merely who dials — a reachability fact that must never imply anything about the grant. */
+  `CREATE TABLE IF NOT EXISTS mesh_edges (
+     id                   TEXT    PRIMARY KEY,
+     peer_node_id         TEXT    NOT NULL,
+     direction            TEXT    NOT NULL CHECK (direction IN ('up','down')),
+     -- JSON array. A SET, never an enum: a new node type is a new combination, not a schema change.
+     role_capabilities    TEXT    NOT NULL DEFAULT '[]',
+     -- JSON array of data categories. ⚠️ '[]' means DENIED, and it is the default: a grant is an
+     -- explicit list, so a category added in a later version can never widen an existing edge.
+     grant_categories     TEXT    NOT NULL DEFAULT '[]',
+     transport_direction  TEXT    NOT NULL CHECK (transport_direction IN ('we-dial','they-dial')),
+     -- Per edge, not global: a parent may hold longer or shorter than the origin, and a client whose
+     -- own retention is shorter must be able to bind the parent to it.
+     retention_days       INTEGER,
+     tombstone_purge_days INTEGER,
+     -- On by default; opt-out is explicit and must be visible in the UI, not buried in config.
+     tls_verify           INTEGER NOT NULL DEFAULT 1,
+     peer_version         TEXT,
+     peer_min_version     TEXT,
+     -- Hub-side grouping. NULL on a child's upward edge; only a parent groups peers into clients.
+     client_id            TEXT,
+     created_at           INTEGER NOT NULL,
+     last_sync_at         INTEGER,
+     revoked_at           INTEGER,
+     -- ⚠️ Duplicate-identity guard at the storage layer, so a cloned VM cannot quietly open a second
+     -- edge and interleave two sites' histories into one unrecoverable row set.
+     UNIQUE (peer_node_id, direction)
+   )`,
+
+  /* Clients — the grouping primitive ABOVE node.
+   *
+   * ⚠️ NOT A WORKSPACE. The six existing roles are workspace-scoped, and an MSP tech needing to see
+   * Acme but not Contoso is a different axis entirely: a client may own three servers, and a
+   * workspace lives inside one of them. "Everyone at the MSP sees every client" is the outcome of
+   * not having this table, and it does not survive a security review. */
+  `CREATE TABLE IF NOT EXISTS mesh_clients (
+     id         TEXT PRIMARY KEY,
+     name       TEXT NOT NULL,
+     notes      TEXT,
+     created_at INTEGER NOT NULL
+   )`,
+
+  /* Who may see which client. ⚠️ DEFAULT DENY BY ABSENCE: no row means no visibility, so a new
+   * client is invisible to everyone until someone is named. The alternative — visible-unless-denied
+   * — silently exposes every new client to every tech the moment it is added. */
+  `CREATE TABLE IF NOT EXISTS mesh_client_access (
+     client_id  TEXT    NOT NULL,
+     user_id    TEXT    NOT NULL,
+     granted_at INTEGER NOT NULL,
+     granted_by TEXT,
+     PRIMARY KEY (client_id, user_id)
+   )`,
+
+  /* Tombstones. Deleting a device on a child must not vanish it from the parent — last month''s
+   * uptime report cannot be allowed to change retroactively, or every report becomes unciteable.
+   * Purge horizon is per edge, so a client with a short retention policy binds the parent too. */
+  `CREATE TABLE IF NOT EXISTS mesh_tombstones (
+     id             TEXT    PRIMARY KEY,
+     origin_node_id TEXT    NOT NULL,
+     object_type    TEXT    NOT NULL,
+     object_id      TEXT    NOT NULL,
+     deleted_at     INTEGER NOT NULL,
+     purge_after    INTEGER,
+     UNIQUE (origin_node_id, object_type, object_id)
+   )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_mesh_edges_peer   ON mesh_edges (peer_node_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_mesh_edges_client ON mesh_edges (client_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_mesh_tomb_origin  ON mesh_tombstones (origin_node_id, object_type)`,
+
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.
