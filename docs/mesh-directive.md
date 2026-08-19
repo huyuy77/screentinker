@@ -207,16 +207,16 @@ explicit purge. A node losing its parent reverts to standalone silently and buff
 it can see, when it last synced, and a revoke button. An MSP link the client cannot see or sever is a
 contract dispute waiting to happen — and visibility is what makes a client comfortable agreeing.
 
-> **Status.** Landed: pairing (`pairing.js`), revocation and disenrollment semantics + consent-from-
-> below (`edge-status.js`), per-child backpressure (`backpressure.js`), and the **topology harness**
-> (`test/helpers/mesh-topology.js`) covering the failure cases below.
+> **Status: complete.** Pairing (`pairing.js`), revocation/disenrollment + consent-from-below
+> (`edge-status.js`), per-child backpressure (`backpressure.js`), node identity and edge storage
+> (`store.js`), and **transport** — parent side `ws/meshSocket.js` on its own `/mesh` namespace,
+> child side `uplink.js` dialling out with jittered backoff and a bounded buffer. The topology
+> harness (`test/helpers/mesh-topology.js`) covers the graph and failure injection;
+> `test/mesh-transport.test.js` covers the real wire.
 >
-> ⚠️ **Remaining: transport wiring — and it is BLOCKED on a dependency decision.** Dialling a parent
-> needs a socket.io *client* on the server, and `socket.io-client` is currently **dev-only** in the
-> lockfile (`dev: true`). Code requiring it would pass every test here and then crash on a production
-> `npm ci --omit=dev` — the same shape as the config-gated TDZ crash that took prod down. It must be
-> promoted to a production dependency (MIT, same authors as `socket.io`) deliberately, since that
-> moves the licence gate and the SBOM, before any transport code is written.
+> ⚠️ Still open: **half-open sockets**. socket.io's ping/pong covers the common case, but a
+> deliberately half-open peer is not yet simulated in CI — it needs a raw TCP fixture, and asserting
+> it without one would be theatre.
 
 ### Topology test harness — a Phase 1 deliverable, not optional
 Spin N nodes in CI, assemble arbitrary graphs, and simulate: parent unreachable, half-open socket,

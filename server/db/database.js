@@ -715,6 +715,11 @@ const migrations = [
      tls_verify           INTEGER NOT NULL DEFAULT 1,
      peer_version         TEXT,
      peer_min_version     TEXT,
+     -- ⚠️ The edge token is stored HASHED, like any session or API token. A parent VERIFIES a token
+     -- and never needs to reproduce one, so keeping plaintext would only turn a leaked database or
+     -- log line into standing access to a client's data.
+     token_hash           TEXT,
+     token_expires_at     INTEGER,
      -- Hub-side grouping. NULL on a child's upward edge; only a parent groups peers into clients.
      client_id            TEXT,
      created_at           INTEGER NOT NULL,
@@ -783,6 +788,10 @@ const migrations = [
      UNIQUE (origin_node_id, object_type, object_id)
    )`,
 
+  /* Idempotent, for anyone who booted this branch before the token columns existed. */
+  `ALTER TABLE mesh_edges ADD COLUMN token_hash TEXT`,
+  `ALTER TABLE mesh_edges ADD COLUMN token_expires_at INTEGER`,
+  `CREATE INDEX IF NOT EXISTS idx_mesh_edges_token  ON mesh_edges (token_hash)`,
   `CREATE INDEX IF NOT EXISTS idx_mesh_edges_peer   ON mesh_edges (peer_node_id)`,
   `CREATE INDEX IF NOT EXISTS idx_mesh_edges_client ON mesh_edges (client_id)`,
   `CREATE INDEX IF NOT EXISTS idx_mesh_tomb_origin  ON mesh_tombstones (origin_node_id, object_type)`,
