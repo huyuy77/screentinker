@@ -744,10 +744,21 @@ const migrations = [
   `CREATE TABLE IF NOT EXISTS mesh_client_access (
      client_id  TEXT    NOT NULL,
      user_id    TEXT    NOT NULL,
+     -- Per-client role. ⚠️ NOT a read/write split: a hub cannot write to a client's screens at all
+     -- in 2.0 (I2), so the axis that differs is control of the RELATIONSHIP — 'viewer' sees the
+     -- client's mirrored data, 'manager' can also change retention, rotate tokens, disenroll, and
+     -- move nodes between clients. See server/lib/mesh/client-roles.js.
+     role       TEXT    NOT NULL DEFAULT 'viewer',
      granted_at INTEGER NOT NULL,
      granted_by TEXT,
      PRIMARY KEY (client_id, user_id)
    )`,
+  /* ⚠️ The ALTER is for anyone who booted this branch between the Phase 0 commit and this one:
+   * CREATE TABLE IF NOT EXISTS is a silent no-op on a table that already exists, so the column
+   * above would never reach them and every role check would read undefined. Idempotent — the loop
+   * below treats "duplicate column name" as benign. Harmless to delete once 2.0 ships, since no
+   * released version ever had this table without the column. */
+  `ALTER TABLE mesh_client_access ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'`,
 
   /* Tombstones. Deleting a device on a child must not vanish it from the parent — last month''s
    * uptime report cannot be allowed to change retroactively, or every report becomes unciteable.

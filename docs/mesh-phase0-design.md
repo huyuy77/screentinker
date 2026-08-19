@@ -17,9 +17,10 @@ are called out at the bottom rather than buried.
 | Role capabilities | `server/lib/mesh/capabilities.js` |
 | Envelope + payload contracts | `server/lib/mesh/envelope.js` |
 | Node identity + version floor | `server/lib/mesh/node-identity.js` |
+| Per-client roles | `server/lib/mesh/client-roles.js` |
 | Schema | `server/db/database.js` (migrations array) |
 | Feature flags | `server/config.js` |
-| Tests | `server/test/mesh-invariants.test.js` (20) |
+| Tests | `server/test/mesh-invariants.test.js` (20), `server/test/mesh-client-roles.test.js` (10) |
 
 ---
 
@@ -120,6 +121,40 @@ client is invisible until someone is named. The alternative — visible-unless-d
 every new client to every tech the moment it is added, which is the wrong direction for a mistake to
 fail in.
 
+### Per-client roles — `viewer` and `manager`
+
+Taken while it was still a `CREATE TABLE` edit rather than a migration against live rows.
+
+⚠️ **The obvious model is wrong for 2.0.** "Read-only on Acme, full on Contoso" sounds like a
+read/write split, but a hub cannot write to a client's screens at all — I2 makes the mesh
+upward-only and there is no downward command handler to authorise. A "full access" role would grant
+a capability that does not exist, which is worse than no role: it reads as a promise the product does
+not keep, and an operator would reasonably assume their tech can act on a screen when they cannot.
+
+The axis that genuinely differs per client is control of the **relationship**:
+
+| Role | May |
+|---|---|
+| `viewer` | see this client's mirrored data, bounded by what the client granted |
+| `manager` | additionally change retention, rotate tokens, disenroll, and move nodes between clients |
+
+A tech who can view Acme's screens is a very different risk from one who can sever Acme's edge — and
+the second is what a client asks about when they ask who at the MSP can do what.
+
+**A third role arrives with Phase 5 and is deliberately not modelled.** That is an asymmetry with
+`grants.js`, which models its write categories and refuses them — and the difference is where the
+value is negotiated. A grant is agreed between two nodes across a version boundary, so its vocabulary
+must be stable or an edge stored today becomes unreadable later. A role is local to this hub's
+database and is never sent anywhere, so adding an enum value later is purely additive. Pre-modelling
+a role whose semantics cannot yet be pinned down would mean guessing, and the guess would be
+load-bearing by the time anyone checked.
+
+Everything unrecognised **fails closed**: an unknown role grants nothing rather than falling back to
+`viewer`, because "lowest role" still means seeing a client's data. `platform_admin` resolves to
+`manager` everywhere, which is honest rather than contained — the instance owner can grant themselves
+any row anyway, and the property a client actually cares about is that an ordinary technician sees
+only the clients they were named on.
+
 ### Tombstones
 
 Deleting a device on a child must not vanish it from the parent: last month's uptime report cannot
@@ -142,13 +177,10 @@ These were decided to keep Phase 0 moving. Each is cheap to change now and expen
    with regional sub-organisations would want nesting, and adding it later is a schema change. Flat
    was chosen because nesting invites the same recursion problems the directive rejects for playlists
    in Phase 5, and no stated requirement needs it yet.
-2. **`mesh_client_access` grants a user access to a whole client, with no per-client role.** A tech
-   either sees Acme or does not. If MSPs need "read-only on Acme, full on Contoso", that is another
-   column and it is easier to add before there are rows.
-3. **`direction` on the edge is `up`/`down` and stored on both sides.** Slight redundancy — each node
+2. **`direction` on the edge is `up`/`down` and stored on both sides.** Slight redundancy — each node
    stores its own view of the same edge — but it means neither side has to derive its relationship
    from the other's table, which matters when they disagree after a partition.
-4. **Skew threshold of 10 minutes** for "notable". A minute is transit noise; ten is a story that will
+3. **Skew threshold of 10 minutes** for "notable". A minute is transit noise; ten is a story that will
    not add up. Arbitrary within an order of magnitude.
 
 ---

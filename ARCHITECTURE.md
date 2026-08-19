@@ -33,6 +33,11 @@ types — they are one node declaring different **capabilities**, connected by *
 
 All in `server/test/mesh-invariants.test.js`.
 
+**Hub-side access** is a separate concern with its own guards in `server/test/mesh-client-roles.test.js`:
+a client is invisible until someone is explicitly named on it, an unrecognised role grants nothing
+rather than falling back to the lowest one, and **no role may imply downward control** — a "full
+access" role would promise a capability I2 says does not exist.
+
 ⏳ **I6 and I8 are stated but not yet guarded.** They are properties of transport, which does not
 exist until Phase 1 — there is nothing to assert against today, and a test that passes because the
 code is absent is worse than no test, because it reads as coverage. The Phase 1 topology harness
