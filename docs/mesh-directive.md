@@ -207,6 +207,11 @@ explicit purge. A node losing its parent reverts to standalone silently and buff
 it can see, when it last synced, and a revoke button. An MSP link the client cannot see or sever is a
 contract dispute waiting to happen — and visibility is what makes a client comfortable agreeing.
 
+> **Status (partial).** Landed: pairing (code mint/burn/expiry, enrollment validation, edge tokens),
+> revocation semantics, and the **topology harness** with the failure cases below. Still to come:
+> real transport wiring, per-child backpressure accounting, disenrollment UI, and consent-visible-
+> from-below. See `server/lib/mesh/pairing.js` and `server/test/helpers/mesh-topology.js`.
+
 ### Topology test harness — a Phase 1 deliverable, not optional
 Spin N nodes in CI, assemble arbitrary graphs, and simulate: parent unreachable, half-open socket,
 child flood, version skew, clock skew, mid-sync disenroll, re-parent, cycle attempt, duplicate UUID.
