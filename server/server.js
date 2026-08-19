@@ -1292,6 +1292,18 @@ startContentExpiry(io);
 const { startAlertService } = require('./services/alerts');
 startAlertService(io);
 
+/*
+ * A2 — threshold alerts. Safe to start unconditionally: with no rules configured the sweep reads an
+ * empty table and returns immediately, so an install that never creates one pays a query a minute
+ * and changes no behaviour. It is deliberately NOT flag-gated, because unlike the mesh this is an
+ * ordinary product feature that happens to have no rules yet.
+ */
+const { startThresholdAlerts } = require('./services/threshold-alerts');
+// ⚠️ Required HERE rather than using a `db` from an outer scope — there isn't one at this point in
+// the file. A free reference would have thrown at boot, which is the same shape as the TDZ crash
+// that took production down: fine in every test, fatal on the one path that matters.
+startThresholdAlerts(require('./db/database').db);
+
 
 // Start activation-nudge sweep (T+3 onboarding nudge; gated on HOSTED_INSTANCE)
 const { startActivationNudge } = require('./services/activationNudge');

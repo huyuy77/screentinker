@@ -792,6 +792,75 @@ const migrations = [
   `ALTER TABLE mesh_edges ADD COLUMN token_hash TEXT`,
   `ALTER TABLE mesh_edges ADD COLUMN token_expires_at INTEGER`,
   /* ------------------------------------------------------------------------------------------
+   * THRESHOLD ALERTS (A2)
+   *
+   * ⚠️ THE EVENTS TABLE IS THE POINT, NOT THE RULES TABLE. Until now alerting was a side effect that
+   * sent an email and remembered nothing, so "were my screens up last month, and what happened?"
+   * was unanswerable — there was no record that an outage had ever begun or ended. An alert with an
+   * opened_at AND a closed_at is a DURATION, and durations are what uptime reports are made of.
+   * ------------------------------------------------------------------------------------------ */
+
+  `CREATE TABLE IF NOT EXISTS alert_rules (
+     id              TEXT PRIMARY KEY,
+     workspace_id    TEXT,
+     name            TEXT NOT NULL,
+     metric          TEXT NOT NULL,
+     threshold       REAL NOT NULL,
+     -- ⚠️ Hysteresis. An alert closes at a DIFFERENT value than it opened at, or a device parked on
+     -- the threshold flaps open/closed forever and the operator learns to mute it. NULL means "use
+     -- a 10% margin on the correct side", which depends on the metric's direction.
+     clear_threshold REAL,
+     -- The condition must hold this long before opening. Kills the transient spike; on its own it
+     -- does NOT kill the flap at the boundary, which is why clear_threshold exists too.
+     sustain_seconds INTEGER NOT NULL DEFAULT 300,
+     severity        TEXT NOT NULL DEFAULT 'warn',
+     enabled         INTEGER NOT NULL DEFAULT 1,
+     created_at      INTEGER NOT NULL,
+     updated_at      INTEGER
+   )`,
+
+  /* The history. One row per incident, from the moment it opened to the moment it cleared. */
+  `CREATE TABLE IF NOT EXISTS alert_events (
+     id           TEXT PRIMARY KEY,
+     rule_id      TEXT,
+     device_id    TEXT,
+     workspace_id TEXT,
+     metric       TEXT NOT NULL,
+     severity     TEXT NOT NULL DEFAULT 'warn',
+     opened_at    INTEGER NOT NULL,
+     -- NULL means STILL OPEN. That is deliberate and load-bearing: "what is wrong right now" is
+     -- "closed_at IS NULL", which is one index away rather than a scan over a status column
+     -- that someone has to remember to update.
+     closed_at    INTEGER,
+     opened_value REAL,
+     peak_value   REAL,
+     closed_value REAL,
+     -- When the notification went out, separately from when the condition began. A send that failed
+     -- must not look like an incident that never happened.
+     notified_at  INTEGER
+   )`,
+
+  /* Evaluation state between ticks.
+   *
+   * ⚠️ breaching_since MUST be persisted, not held in memory. A service that restarts hourly could
+   * otherwise never open a rule with a 5-minute sustain — the clock would reset every restart, and
+   * the failure is completely silent: no alerts, no errors, everything apparently fine. */
+  `CREATE TABLE IF NOT EXISTS alert_rule_state (
+     rule_id         TEXT NOT NULL,
+     device_id       TEXT NOT NULL,
+     breaching_since INTEGER,
+     open_event_id   TEXT,
+     last_value      REAL,
+     updated_at      INTEGER,
+     PRIMARY KEY (rule_id, device_id)
+   )`,
+
+  /* "What is wrong right now" and "what happened to this screen" are the two queries that matter. */
+  `CREATE INDEX IF NOT EXISTS idx_alert_events_open   ON alert_events (closed_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_alert_events_device ON alert_events (device_id, opened_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_alert_events_ws     ON alert_events (workspace_id, opened_at)`,
+
+  /* ------------------------------------------------------------------------------------------
    * MIRRORED STATE — what a parent keeps about the nodes below it.
    *
    * ⚠️ TWO TIMESTAMPS ON EVERY ROW, AND THEY ARE NOT REDUNDANT. `origin_ts` is when the origin node
