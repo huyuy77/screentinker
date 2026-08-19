@@ -46,15 +46,85 @@ object WebViewSupport {
         // IME is suppressed (it mutates the input value directly, no focus needed).
         webView.isFocusable = true
         webView.isFocusableInTouchMode = true
-        webView.webViewClient = object : WebViewClient() {
-            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                if (request?.isForMainFrame == true) {
-                    DebugLog.e(tag, "WebView load error ${error?.errorCode} ${error?.description} url=${request.url}")
+        /*
+         * ⚠️ A FAILED LOAD MUST RETRY ITSELF.
+         *
+         * A panel powers on faster than the network hands it an address, so the first load runs
+         * before DHCP finishes, fails, and the WebView paints Chrome's "webpage not available".
+         * That page then stays up: nothing here used to do anything but log it. The screen was
+         * still broken minutes later with the network long since up, and the only field fix was
+         * power-cycling the panel — in front of whoever was being shown the product.
+         *
+         * State per WebView, held in the closure: how many attempts, and the pending Runnable so a
+         * teardown can cancel it. WebViewRetryPolicy decides what is worth retrying and how long to
+         * wait; see the reasoning there.
+         */
+        var retryAttempt = 0
+        var pendingRetry: Runnable? = null
+
+        fun cancelRetry(view: WebView?) {
+            pendingRetry?.let { view?.removeCallbacks(it) }
+            pendingRetry = null
+        }
+
+        fun scheduleRetry(view: WebView?, url: String?, why: String) {
+            if (view == null) return
+            if (!WebViewRetryPolicy.isRetryableUrl(url)) return
+            retryAttempt += 1
+            val delay = WebViewRetryPolicy.delayMsFor(retryAttempt)
+            DebugLog.w(tag, "load failed ($why) — retry #$retryAttempt in ${delay}ms url=$url")
+            cancelRetry(view)
+            val r = Runnable {
+                pendingRetry = null
+                // Re-request the URL rather than reload(): after an error the WebView's current
+                // page is Chrome's error document, and reload() on some builds re-renders that
+                // instead of fetching again.
+                try { view.loadUrl(url!!) } catch (t: Throwable) {
+                    DebugLog.e(tag, "retry load threw: ${t.message}")
                 }
             }
+            pendingRetry = r
+            view.postDelayed(r, delay)
+        }
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                /*
+                 * A new load supersedes any retry we were holding. Without this, the player moving
+                 * this WebView on to the next item — or tearing it down with about:blank — would
+                 * still be chased by a pending reload of the PREVIOUS url, which lands seconds later
+                 * and puts a frame back on screen that nothing is expecting.
+                 */
+                cancelRetry(view)
+                super.onPageStarted(view, url, favicon)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                // A page that loaded is the end of the backoff: the next fault starts from 2s again,
+                // so a screen that drops out for a moment recovers quickly rather than inheriting a
+                // 30s wait from an outage hours ago.
+                if (WebViewRetryPolicy.isRetryableUrl(url) && retryAttempt > 0) {
+                    DebugLog.i(tag, "load recovered after $retryAttempt retry(s) url=$url")
+                }
+                if (WebViewRetryPolicy.isRetryableUrl(url)) retryAttempt = 0
+                super.onPageFinished(view, url)
+            }
+
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                if (request?.isForMainFrame != true) return
+                val code = error?.errorCode ?: WebViewClient.ERROR_UNKNOWN
+                DebugLog.e(tag, "WebView load error $code ${error?.description} url=${request.url}")
+                if (WebViewRetryPolicy.shouldRetryError(code)) {
+                    scheduleRetry(view, request.url?.toString(), "error $code")
+                }
+            }
+
             override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
-                if (request?.isForMainFrame == true) {
-                    DebugLog.e(tag, "WebView HTTP ${errorResponse?.statusCode} url=${request.url}")
+                if (request?.isForMainFrame != true) return
+                val status = errorResponse?.statusCode ?: 0
+                DebugLog.e(tag, "WebView HTTP $status url=${request.url}")
+                if (WebViewRetryPolicy.shouldRetryHttp(status)) {
+                    scheduleRetry(view, request.url?.toString(), "HTTP $status")
                 }
             }
         }
