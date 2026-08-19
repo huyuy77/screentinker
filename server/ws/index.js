@@ -23,6 +23,7 @@ module.exports = function setupWebSockets(io) {
     try {
       const setupMeshSocket = require('./meshSocket');
       const store = require('../lib/mesh/store');
+      const mirrorStore = require('../lib/mesh/mirror-store');
       const { db } = require('../db/database');
 
       const thisNodeId = store.ensureNodeIdentity(db);
@@ -35,11 +36,20 @@ module.exports = function setupWebSockets(io) {
           acceptEnrollment: () => true,
           findEdgeByTokenHash: (hash) => store.findEdgeByTokenHash(db, hash),
           /*
-           * Phase 1 delivers the payload and records that the edge is alive. STORING mirrored rows is
-           * Phase 2 (upward aggregation), which defines what is kept and for how long — writing a
-           * guess at that now would be a schema someone has to live with.
+           * ⚠️ WRAPPED, AND THE EDGE IS TOUCHED FIRST. A storage failure — a disk full, a constraint
+           * we did not anticipate from a newer child — must not make the node look unreachable as
+           * well. Recording that we HEARD from it is true regardless of whether we managed to keep
+           * what it said, and conflating the two would show a healthy site as offline (I6).
            */
-          onEnvelope: (edge) => store.touchEdge(db, edge.id),
+          onEnvelope: (edge, env, meta) => {
+            store.touchEdge(db, edge.id);
+            if (meta && meta.relayOnly) return;   // I5: relayed, not interpreted, not stored
+            try {
+              mirrorStore.storeEnvelope(db, edge, env);
+            } catch (e) {
+              console.warn(`[mesh] could not store ${env && env.type} from ${edge.peer_node_id}: ${e && e.message}`);
+            }
+          },
         });
         console.log(`[mesh] listening for child nodes as ${thisNodeId}`);
       }

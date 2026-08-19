@@ -1,0 +1,302 @@
+'use strict';
+
+/*
+ * What a parent keeps about the nodes below it, and how it gets rid of it.
+ *
+ * ⚠️ THE PROPERTIES THAT ARE EASY TO GET WRONG AND HARD TO NOTICE:
+ *
+ *   - a reconnecting child re-sends state; if that duplicates rows, every count on the hub silently
+ *     doubles and nobody suspects the storage layer
+ *   - pruning by age is right for history and catastrophic for current state — a screen that has not
+ *     changed in six months would vanish from the hub while still hanging on a wall
+ *   - deleting on disenrollment rewrites last month's report, so the report cannot be cited
+ *   - freshness read from the ROW rather than the EDGE is wrong in both directions
+ */
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { Database } = require('../db/sqlite-driver');
+const ms = require('../lib/mesh/mirror-store');
+
+const NOW = 1_700_000_000;   // seconds
+
+/** A throwaway database with just the mirror tables, built from the same DDL shape as the schema. */
+function freshDb() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-'));
+  const db = new Database(path.join(dir, 'm.db'));
+  db.exec(`
+    CREATE TABLE mesh_mirror_nodes (
+      origin_node_id TEXT PRIMARY KEY, via_edge_id TEXT NOT NULL, node_version TEXT,
+      device_count INTEGER, devices_online INTEGER, origin_ts INTEGER,
+      received_at INTEGER NOT NULL, stale_since INTEGER);
+    CREATE TABLE mesh_mirror_devices (
+      origin_node_id TEXT NOT NULL, device_id TEXT NOT NULL, name TEXT, status TEXT,
+      last_heartbeat INTEGER, body TEXT NOT NULL DEFAULT '{}', origin_ts INTEGER,
+      received_at INTEGER NOT NULL, deleted_at INTEGER,
+      PRIMARY KEY (origin_node_id, device_id));
+    CREATE TABLE mesh_mirror_alerts (
+      id TEXT PRIMARY KEY, origin_node_id TEXT NOT NULL, alert_type TEXT NOT NULL, severity TEXT,
+      subject_count INTEGER, subjects TEXT, opened_at INTEGER, closed_at INTEGER,
+      origin_ts INTEGER, received_at INTEGER NOT NULL);
+    CREATE TABLE mesh_mirror_play_logs (
+      id TEXT PRIMARY KEY, origin_node_id TEXT NOT NULL, device_id TEXT, content_ref TEXT,
+      played_at INTEGER, duration_ms INTEGER, origin_ts INTEGER, received_at INTEGER NOT NULL);
+  `);
+  db._dir = dir;
+  return db;
+}
+const cleanup = (db) => { try { db.close(); } catch {} fs.rmSync(db._dir, { recursive: true, force: true }); };
+
+const env = (type, body, over = {}) => ({
+  type, body, origin_node_id: 'node-a', origin_ts: NOW * 1000, ...over,
+});
+const edge = (over = {}) => ({ id: 'e1', peer_node_id: 'node-a', retention_days: 30,
+                               tombstone_purge_days: 30, last_sync_at: NOW, revoked_at: null, ...over });
+
+// ===== idempotence =====
+
+test('THE RECONNECT CASE: re-sent state updates rather than duplicating', () => {
+  /*
+   * ⚠️ A child that reconnects and backfills WILL re-send what it already sent. An insert-only design
+   * turns an ordinary reconnect into duplicate rows, and every count on the hub's dashboard silently
+   * doubles — with nothing pointing at the storage layer as the cause.
+   */
+  const db = freshDb();
+  try {
+    for (let i = 0; i < 3; i++) {
+      ms.storeEnvelope(db, edge(), env('device-summary',
+        { id: 'dev-1', name: 'Lobby', status: 'online' }), NOW + i);
+    }
+    const rows = db.prepare('SELECT * FROM mesh_mirror_devices').all();
+    assert.equal(rows.length, 1, 'one device, however many times it reports');
+    assert.equal(rows[0].received_at, NOW + 2, 'and it holds the latest');
+  } finally { cleanup(db); }
+});
+
+test('a play log re-sent during backfill is a no-op, never an update', () => {
+  // ⚠️ A play event is an immutable historical fact. Anything that "updates" a past play is
+  // corrupting evidence somebody may be invoicing against.
+  const db = freshDb();
+  try {
+    ms.storeEnvelope(db, edge(), env('proof-of-play',
+      { id: 'p1', device_id: 'dev-1', played_at: NOW, duration_ms: 5000 }), NOW);
+    ms.storeEnvelope(db, edge(), env('proof-of-play',
+      { id: 'p1', device_id: 'dev-1', played_at: NOW, duration_ms: 999999 }), NOW + 60);
+
+    const rows = db.prepare('SELECT * FROM mesh_mirror_play_logs').all();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].duration_ms, 5000, 'the original fact stands');
+  } finally { cleanup(db); }
+});
+
+test('hearing from a node clears its stale mark', () => {
+  // Otherwise a node that was disconnected and later re-paired stays greyed out while reporting.
+  const db = freshDb();
+  try {
+    ms.storeEnvelope(db, edge(), env('node-health', { version: '2.0.0', device_count: 4 }), NOW);
+    ms.markNodeStale(db, 'node-a', NOW + 10);
+    assert.ok(db.prepare('SELECT stale_since FROM mesh_mirror_nodes').get().stale_since);
+
+    ms.storeEnvelope(db, edge(), env('node-health', { version: '2.0.0', device_count: 4 }), NOW + 20);
+    assert.equal(db.prepare('SELECT stale_since FROM mesh_mirror_nodes').get().stale_since, null);
+  } finally { cleanup(db); }
+});
+
+// ===== grant-shaped storage =====
+
+test('a health-only device stores a NULL name, which is what makes it un-searchable', () => {
+  /*
+   * A documented consequence of the grant, not a bug — and the empty state has to say so, or someone
+   * "fixes" the missing search result by widening the grant.
+   */
+  const db = freshDb();
+  try {
+    ms.storeEnvelope(db, edge(), env('device-summary', { id: 'dev-1', status: 'online' }), NOW);
+    const row = db.prepare('SELECT name, status FROM mesh_mirror_devices').get();
+    assert.equal(row.name, null);
+    assert.equal(row.status, 'online', 'while what WAS granted is queryable');
+  } finally { cleanup(db); }
+});
+
+test('an unknown payload type is not stored at all', () => {
+  // ⚠️ Relayable is a TRANSPORT property (I5). Inventing a table for a payload this node cannot
+  // interpret would be storing bytes nobody can ever read — how a mirror becomes a landfill.
+  const db = freshDb();
+  try {
+    assert.equal(ms.storeEnvelope(db, edge(), env('invented-in-2027', { x: 1 }), NOW), null);
+    assert.equal(db.prepare('SELECT COUNT(*) c FROM mesh_mirror_devices').get().c, 0);
+  } finally { cleanup(db); }
+});
+
+// ===== retention =====
+
+test('⚠️ pruning by age NEVER touches current state', () => {
+  /*
+   * THE DANGEROUS ONE. mesh_mirror_devices holds the LATEST state, so an age sweep would delete a
+   * screen that simply has not changed in six months — and it would vanish from the hub while still
+   * hanging on a wall. Only history ages out.
+   */
+  const db = freshDb();
+  try {
+    const old = NOW - 400 * 86400;
+    ms.storeEnvelope(db, edge(), env('device-summary', { id: 'dev-1', name: 'Old Faithful' }), old);
+    ms.storeEnvelope(db, edge(), env('alert-event',
+      { id: 'a-old', type: 'offline', opened_at: old, closed_at: old + 60 }), old);
+    ms.storeEnvelope(db, edge(), env('proof-of-play', { id: 'p-old', played_at: old }), old);
+
+    const pruned = ms.pruneEdge(db, edge({ retention_days: 30 }), NOW);
+    assert.equal(pruned.alerts, 1, 'a closed alert ages out');
+    assert.equal(pruned.playLogs, 1, 'and so does history');
+    assert.equal(db.prepare('SELECT COUNT(*) c FROM mesh_mirror_devices').get().c, 1,
+      'but the screen stays — it is current state, not history');
+  } finally { cleanup(db); }
+});
+
+test('an OPEN alert is current state and survives retention however old', () => {
+  const db = freshDb();
+  try {
+    const old = NOW - 400 * 86400;
+    ms.storeEnvelope(db, edge(), env('alert-event',
+      { id: 'a-open', type: 'offline', opened_at: old, closed_at: null }), old);
+    ms.pruneEdge(db, edge({ retention_days: 30 }), NOW);
+    assert.equal(db.prepare('SELECT COUNT(*) c FROM mesh_mirror_alerts').get().c, 1,
+      'a problem that is still happening is not history');
+  } finally { cleanup(db); }
+});
+
+test('retention is PER EDGE, so a client can bind the parent to their own policy', () => {
+  /*
+   * ⚠️ Holding a client's data longer than they hold it is a real problem in a regulated environment,
+   * and it is discovered during an audit rather than by us.
+   */
+  const db = freshDb();
+  try {
+    const age = NOW - 60 * 86400;
+    ms.storeEnvelope(db, edge(), env('proof-of-play', { id: 'p1', played_at: age }), age);
+    // 90-day edge keeps it...
+    assert.equal(ms.pruneEdge(db, edge({ retention_days: 90 }), NOW).playLogs, 0);
+    // ...a 30-day edge does not.
+    assert.equal(ms.pruneEdge(db, edge({ retention_days: 30 }), NOW).playLogs, 1);
+  } finally { cleanup(db); }
+});
+
+test('retention of 0 or unset prunes nothing rather than everything', () => {
+  // ⚠️ The failure direction matters: an unset retention silently deleting a client's history would
+  // be discovered far too late. Absent means "keep", never "purge".
+  const db = freshDb();
+  try {
+    ms.storeEnvelope(db, edge(), env('proof-of-play', { id: 'p1', played_at: NOW - 999 * 86400 }), NOW);
+    assert.equal(ms.pruneEdge(db, edge({ retention_days: 0 }), NOW).playLogs, 0);
+    assert.equal(ms.pruneEdge(db, edge({ retention_days: undefined }), NOW).playLogs, 0);
+  } finally { cleanup(db); }
+});
+
+// ===== deletion =====
+
+test('a device deleted on the child is MARKED, not removed', () => {
+  const db = freshDb();
+  try {
+    ms.storeEnvelope(db, edge(), env('device-summary', { id: 'dev-1', name: 'Gone' }), NOW);
+    ms.storeEnvelope(db, edge(), env('tombstone', { object_id: 'dev-1', deleted_at: NOW }), NOW);
+
+    const row = ms.readDevice(db, 'node-a', 'dev-1');
+    assert.ok(row, 'the row survives — last month\'s report must not change retroactively');
+    assert.equal(row.deleted_at, NOW);
+
+    // Purge is a separate horizon, and also per edge.
+    assert.equal(ms.pruneEdge(db, edge({ tombstone_purge_days: 30 }), NOW + 31 * 86400).tombstoned, 1);
+  } finally { cleanup(db); }
+});
+
+test('a device that reports again is no longer deleted', () => {
+  // A tombstone followed by a live report is a device that came back, not a contradiction.
+  const db = freshDb();
+  try {
+    ms.storeEnvelope(db, edge(), env('device-summary', { id: 'dev-1' }), NOW);
+    ms.storeEnvelope(db, edge(), env('tombstone', { object_id: 'dev-1', deleted_at: NOW }), NOW);
+    ms.storeEnvelope(db, edge(), env('device-summary', { id: 'dev-1', status: 'online' }), NOW + 10);
+    assert.equal(ms.readDevice(db, 'node-a', 'dev-1').deleted_at, null);
+  } finally { cleanup(db); }
+});
+
+test('purge on request removes everything from one node, and only that node', () => {
+  const db = freshDb();
+  try {
+    ms.storeEnvelope(db, edge(), env('device-summary', { id: 'd1' }), NOW);
+    ms.storeEnvelope(db, edge(), env('proof-of-play', { id: 'p1', played_at: NOW }), NOW);
+    ms.storeEnvelope(db, edge({ peer_node_id: 'node-b' }),
+      env('device-summary', { id: 'd2' }, { origin_node_id: 'node-b' }), NOW);
+
+    const out = ms.purgeNode(db, 'node-a');
+    assert.equal(out.devices, 1);
+    assert.equal(out.playLogs, 1);
+    assert.equal(db.prepare('SELECT COUNT(*) c FROM mesh_mirror_devices').get().c, 1,
+      'the other client is untouched');
+  } finally { cleanup(db); }
+});
+
+// ===== freshness =====
+
+test('⚠️ freshness comes from the EDGE, not the row age', () => {
+  /*
+   * A device row an hour old is perfectly current if its node reports hourly and is reachable, and
+   * badly out of date if the node dropped ten minutes ago. This is the data behind Phase 3's
+   * tri-state, where a WAN blip on one hub link must never paint 400 healthy screens red.
+   */
+  assert.equal(ms.freshnessOf(edge({ last_sync_at: NOW - 10 }), NOW), 'live');
+  assert.equal(ms.freshnessOf(edge({ last_sync_at: NOW - 3600 }), NOW), 'stale');
+  assert.equal(ms.freshnessOf(edge({ revoked_at: NOW }), NOW), 'stale');
+  // ⚠️ Never synced is NOT stale — it is a link that has not started, and calling it unhealthy sends
+  // someone debugging something that is merely new.
+  assert.equal(ms.freshnessOf(edge({ last_sync_at: null }), NOW), 'unknown');
+});
+
+test('⚠️ the fixture schema matches the REAL one', () => {
+  /*
+   * The DDL above is hand-written, and a fixture that drifts from the real schema is a test that
+   * proves nothing about production. This project has already been bitten by exactly that: the
+   * admin-users fixture lacked `email_verified`, so a bug in that column had no coverage in either
+   * direction until the fix broke four tests.
+   *
+   * Boots the real migrations in a child process (config.js resolves DATA_DIR once at load) and
+   * compares column sets.
+   */
+  const { execFileSync } = require('node:child_process');
+  const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-schema-'));
+  try {
+    const probe = `
+      require('./db/database.js');
+      const { Database } = require('./db/sqlite-driver');
+      const db = new Database(require('path').join(process.env.DATA_DIR, 'db', 'remote_display.db'));
+      const out = {};
+      for (const t of ['mesh_mirror_nodes','mesh_mirror_devices','mesh_mirror_alerts','mesh_mirror_play_logs']) {
+        out[t] = db.prepare("select name from pragma_table_info('" + t + "')").all().map(r => r.name).sort();
+      }
+      db.close();
+      console.log('SCHEMA=' + JSON.stringify(out));
+    `;
+    const out = execFileSync(process.execPath, ['-e', probe], {
+      cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 120000,
+      env: { ...process.env, DATA_DIR, SELF_HOSTED: 'true', NODE_ENV: 'test' },
+    });
+    const line = out.split('\n').find((l) => l.startsWith('SCHEMA='));
+    assert.ok(line, `probe produced no result:\n${out.slice(-400)}`);
+    const real = JSON.parse(line.slice('SCHEMA='.length));
+
+    const fixture = freshDb();
+    try {
+      for (const [table, realCols] of Object.entries(real)) {
+        assert.ok(realCols.length > 0, `${table} is missing from the real schema entirely`);
+        const fixtureCols = fixture.prepare(
+          `select name from pragma_table_info('${table}')`).all().map((r) => r.name).sort();
+        assert.deepEqual(fixtureCols, realCols,
+          `${table}: the test fixture and the real schema have drifted`);
+      }
+    } finally { cleanup(fixture); }
+  } finally {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  }
+});

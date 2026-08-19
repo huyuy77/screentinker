@@ -227,8 +227,12 @@ test('every existing install becomes a node with zero edges (migration is a no-o
         .all().map(r => r.name).sort();
       const edgeCols = db.prepare("select name from pragma_table_info('mesh_edges')").all().map(r => r.name);
       const edges = db.prepare('select count(*) c from mesh_edges').get().c;
+      const mirrorCounts = {};
+      for (const t of ['mesh_mirror_nodes','mesh_mirror_devices','mesh_mirror_alerts','mesh_mirror_play_logs']) {
+        mirrorCounts[t] = db.prepare('select count(*) c from ' + t).get().c;
+      }
       db.close();
-      console.log('MESH_PROBE=' + JSON.stringify({ tables, edgeCols, edges }));
+      console.log('MESH_PROBE=' + JSON.stringify({ tables, edgeCols, edges, mirrorCounts }));
     `;
     const out = execFileSync(process.execPath, ['-e', probe], {
       cwd: path.join(__dirname, '..'),
@@ -238,10 +242,25 @@ test('every existing install becomes a node with zero edges (migration is a no-o
     });
     const line = out.split('\n').find((l) => l.startsWith('MESH_PROBE='));
     assert.ok(line, `probe produced no result:\n${out.slice(-500)}`);
-    const { tables, edgeCols, edges } = JSON.parse(line.slice('MESH_PROBE='.length));
+    const { tables, edgeCols, edges, mirrorCounts } = JSON.parse(line.slice('MESH_PROBE='.length));
 
-    assert.deepEqual(tables,
-      ['mesh_client_access', 'mesh_clients', 'mesh_edges', 'mesh_node', 'mesh_tombstones']);
+    /*
+     * ⚠️ An EXACT list, not a subset check. It exists to notice a table appearing, which is how this
+     * assertion earned its keep — the four mesh_mirror_* tables tripped it the moment Phase 2's
+     * storage landed. A `.includes()` check would have accepted them silently, and a new table that
+     * nobody reviewed is precisely the thing worth a failing test.
+     */
+    assert.deepEqual(tables, [
+      'mesh_client_access', 'mesh_clients', 'mesh_edges',
+      'mesh_mirror_alerts', 'mesh_mirror_devices', 'mesh_mirror_nodes', 'mesh_mirror_play_logs',
+      'mesh_node', 'mesh_tombstones',
+    ]);
+
+    // Still empty on a fresh install: tables exist, nothing is mirrored until something is paired.
+    for (const t of ['mesh_mirror_nodes', 'mesh_mirror_devices', 'mesh_mirror_alerts',
+                     'mesh_mirror_play_logs']) {
+      assert.equal(mirrorCounts[t], 0, `${t} must be empty on an install that has never paired`);
+    }
     assert.equal(edges, 0,
       'a fresh install must have zero edges — pairing is the only thing that creates one');
     // ⚠️ Edges are a table precisely so that multi-parent stays possible.

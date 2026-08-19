@@ -791,6 +791,100 @@ const migrations = [
   /* Idempotent, for anyone who booted this branch before the token columns existed. */
   `ALTER TABLE mesh_edges ADD COLUMN token_hash TEXT`,
   `ALTER TABLE mesh_edges ADD COLUMN token_expires_at INTEGER`,
+  /* ------------------------------------------------------------------------------------------
+   * MIRRORED STATE — what a parent keeps about the nodes below it.
+   *
+   * ⚠️ TWO TIMESTAMPS ON EVERY ROW, AND THEY ARE NOT REDUNDANT. `origin_ts` is when the origin node
+   * observed it, from its clock; `received_at` is when we were told, from ours. Phase 3's tri-state
+   * status is impossible without both: "online as of 14:32" and "we have not heard since 12:05" are
+   * different sentences, and collapsing them into one column is what makes a dashboard show a green
+   * dot from ninety minutes ago — a lie by omission.
+   *
+   * ⚠️ STALENESS IS A PROPERTY OF THE EDGE, NOT OF THE ROW. A device row an hour old is perfectly
+   * current if its node reports hourly and is reachable; it is stale if the node fell off ten minutes
+   * ago. So freshness is judged by joining to mesh_edges.last_sync_at, never by the row's own age.
+   *
+   * ⚠️ EVERY ROW CARRIES origin_node_id, NEVER A PATH (I4). Re-parenting a node changes the display
+   * path and nothing else — history keeps resolving to the same node.
+   * ------------------------------------------------------------------------------------------ */
+
+  /* One row per node we have ever heard from, holding its latest self-report. */
+  `CREATE TABLE IF NOT EXISTS mesh_mirror_nodes (
+     origin_node_id  TEXT PRIMARY KEY,
+     via_edge_id     TEXT NOT NULL,
+     node_version    TEXT,
+     device_count    INTEGER,
+     devices_online  INTEGER,
+     origin_ts       INTEGER,
+     received_at     INTEGER NOT NULL,
+     -- Set when the edge is revoked. The rows are KEPT (last month's report must not change
+     -- retroactively) and simply marked, so a UI can grey them rather than delete them.
+     stale_since     INTEGER
+   )`,
+
+  /* Latest known state per device, per origin node.
+   *
+   * ⚠️ HOT FIELDS ARE REAL COLUMNS; THE REST IS JSON. The projection is grant-dependent, so a fixed
+   * column per field would be mostly NULL and would need a migration every time a category is added.
+   * But Phase 3 requires server-side search and pagination from the start — "fine at 40 devices,
+   * fatal at 10,000" — and you cannot index inside a JSON blob, so the fields people actually filter
+   * and sort by are extracted. `name` is nullable precisely because a health-only grant does not
+   * include it, which is what makes those devices un-searchable by name (a documented consequence,
+   * not a bug). */
+  `CREATE TABLE IF NOT EXISTS mesh_mirror_devices (
+     origin_node_id  TEXT NOT NULL,
+     device_id       TEXT NOT NULL,
+     name            TEXT,
+     status          TEXT,
+     last_heartbeat  INTEGER,
+     body            TEXT NOT NULL DEFAULT '{}',
+     origin_ts       INTEGER,
+     received_at     INTEGER NOT NULL,
+     deleted_at      INTEGER,
+     PRIMARY KEY (origin_node_id, device_id)
+   )`,
+
+  /* Alert events, kept as history rather than as current state — an alert that closed last week is
+   * still the evidence behind last week's report. */
+  `CREATE TABLE IF NOT EXISTS mesh_mirror_alerts (
+     id              TEXT PRIMARY KEY,
+     origin_node_id  TEXT NOT NULL,
+     alert_type      TEXT NOT NULL,
+     severity        TEXT,
+     subject_count   INTEGER,
+     subjects        TEXT,
+     opened_at       INTEGER,
+     closed_at       INTEGER,
+     origin_ts       INTEGER,
+     received_at     INTEGER NOT NULL
+   )`,
+
+  /* Proof-of-play. ⚠️ ITS OWN TABLE BECAUSE OF SCALE AND BECAUSE OF PHASE 4. A single production
+   * node holds 1.29M play rows; a hub over forty sites is in the tens of millions, so it must be
+   * prunable on its own retention without touching anything else. It is also the one payload that
+   * must NEVER be downsampled — averaged proof-of-play is not evidence — so it can never be folded
+   * into a rolled-up telemetry table. */
+  `CREATE TABLE IF NOT EXISTS mesh_mirror_play_logs (
+     id              TEXT PRIMARY KEY,
+     origin_node_id  TEXT NOT NULL,
+     device_id       TEXT,
+     content_ref     TEXT,
+     played_at       INTEGER,
+     duration_ms     INTEGER,
+     origin_ts       INTEGER,
+     received_at     INTEGER NOT NULL
+   )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_mirror_dev_node   ON mesh_mirror_devices (origin_node_id)`,
+  /* Search and sort paths for Phase 3. Name is indexed despite being nullable — a partial-ish index
+   * is still what makes "find the screen called Reception" bounded across 10,000 rows. */
+  `CREATE INDEX IF NOT EXISTS idx_mirror_dev_name   ON mesh_mirror_devices (name)`,
+  `CREATE INDEX IF NOT EXISTS idx_mirror_dev_status ON mesh_mirror_devices (status)`,
+  `CREATE INDEX IF NOT EXISTS idx_mirror_alert_node ON mesh_mirror_alerts (origin_node_id, opened_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_mirror_alert_open ON mesh_mirror_alerts (closed_at)`,
+  /* Retention prunes by age, so the age is the index. */
+  `CREATE INDEX IF NOT EXISTS idx_mirror_play_age   ON mesh_mirror_play_logs (origin_node_id, played_at)`,
+
   `CREATE INDEX IF NOT EXISTS idx_mesh_edges_token  ON mesh_edges (token_hash)`,
   `CREATE INDEX IF NOT EXISTS idx_mesh_edges_peer   ON mesh_edges (peer_node_id)`,
   `CREATE INDEX IF NOT EXISTS idx_mesh_edges_client ON mesh_edges (client_id)`,
