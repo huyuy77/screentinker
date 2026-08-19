@@ -103,7 +103,7 @@ test('every help tip is translated in every active locale', () => {
 });
 
 // Every locale shipped in frontend/js/i18n. Keep in step with the registry in i18n.js.
-const ACTIVE_LOCALES = ['es', 'fr', 'de', 'pt', 'hi', 'it', 'ja'];
+const ACTIVE_LOCALES = ['es', 'fr', 'de', 'pt', 'hi', 'it', 'ja', 'zh'];
 
 test('a locale never defines a key that English does not', () => {
   // The half of parity that is ALWAYS actionable: a key in a locale file that no longer exists in
