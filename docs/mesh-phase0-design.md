@@ -18,9 +18,10 @@ are called out at the bottom rather than buried.
 | Envelope + payload contracts | `server/lib/mesh/envelope.js` |
 | Node identity + version floor | `server/lib/mesh/node-identity.js` |
 | Per-client roles | `server/lib/mesh/client-roles.js` |
+| Client nesting + access resolution | `server/lib/mesh/client-tree.js` |
 | Schema | `server/db/database.js` (migrations array) |
 | Feature flags | `server/config.js` |
-| Tests | `server/test/mesh-invariants.test.js` (20), `server/test/mesh-client-roles.test.js` (10) |
+| Tests | `server/test/mesh-invariants.test.js` (20), `server/test/mesh-client-roles.test.js` (10), `server/test/mesh-client-tree.test.js` (15) |
 
 ---
 
@@ -155,6 +156,38 @@ Everything unrecognised **fails closed**: an unknown role grants nothing rather 
 any row anyway, and the property a client actually cares about is that an ordinary technician sees
 only the clients they were named on.
 
+### Clients nest, and access inherits — but never silently
+
+⚠️ **Inheritance collides with default-deny-by-absence, and the collision is the design.** The rule
+above says a new client is invisible until somebody is named on it. Inheritance breaks that by
+construction: put a client under West Region and everyone holding West Region can see it, with nobody
+naming them.
+
+Both properties are worth keeping, so the resolution is not to pick one. Inherited access is allowed;
+it just may never be **silent**:
+
+- `resolveAccess` always returns **provenance** — `direct`, `inherited` (and via which ancestor), or
+  `platform-admin`. There is deliberately no way to ask "what is my role" and get a bare answer, because
+  a UI that cannot tell the two apart cannot warn about the second.
+- `whoGainsAccess(child, parent)` answers *"who is about to be able to see this"* **before** the move
+  is saved, so the UI can say "3 users will gain access to Acme through West Region" and the operator
+  agrees to it rather than discovering it.
+
+The dangerous property was never inheritance. It was inheritance nobody was told about.
+
+**Most-specific wins**, so a child row can *narrow* an inherited role — manager across West Region but
+viewer on the one client under NDA. An inherit-the-maximum model cannot express that, and it is the
+case an MSP will actually hit.
+
+**An unrecognised role stops the walk** rather than being skipped. Skipping would continue up the chain
+and hand the user the *broader* inherited role, quietly turning a typo into an escalation.
+
+**Depth is capped at 4** — holding company → MSP → region → client. Resolution walks this chain on
+every permission check, so unbounded depth is unbounded work on a hot path plus a pathological case if
+someone builds a 500-deep chain by script. Cycles are refused by reachability (the same reasoning as
+I3), and `ancestorChain` additionally stops on a repeat so a cycle in *stored* data — a hand-edited
+row — fails a request instead of hanging one.
+
 ### Tombstones
 
 Deleting a device on a child must not vanish it from the parent: last month's uptime report cannot
@@ -173,14 +206,10 @@ migrations it did not perform. Guarded by the schema test.
 
 These were decided to keep Phase 0 moving. Each is cheap to change now and expensive after Phase 1.
 
-1. **Client is a flat grouping, not a hierarchy.** A client owns edges; clients do not nest. An MSP
-   with regional sub-organisations would want nesting, and adding it later is a schema change. Flat
-   was chosen because nesting invites the same recursion problems the directive rejects for playlists
-   in Phase 5, and no stated requirement needs it yet.
-2. **`direction` on the edge is `up`/`down` and stored on both sides.** Slight redundancy — each node
+1. **`direction` on the edge is `up`/`down` and stored on both sides.** Slight redundancy — each node
    stores its own view of the same edge — but it means neither side has to derive its relationship
    from the other's table, which matters when they disagree after a partition.
-3. **Skew threshold of 10 minutes** for "notable". A minute is transit noise; ten is a story that will
+2. **Skew threshold of 10 minutes** for "notable". A minute is transit noise; ten is a story that will
    not add up. Arbitrary within an order of magnitude.
 
 ---

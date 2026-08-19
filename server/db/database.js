@@ -732,11 +732,21 @@ const migrations = [
    * workspace lives inside one of them. "Everyone at the MSP sees every client" is the outcome of
    * not having this table, and it does not survive a security review. */
   `CREATE TABLE IF NOT EXISTS mesh_clients (
-     id         TEXT PRIMARY KEY,
-     name       TEXT NOT NULL,
-     notes      TEXT,
-     created_at INTEGER NOT NULL
+     id               TEXT PRIMARY KEY,
+     name             TEXT NOT NULL,
+     notes            TEXT,
+     -- Nesting, for an MSP with regional structure: holding company -> MSP -> region -> client.
+     -- ⚠️ Capped at 4 levels and cycle-checked in server/lib/mesh/client-tree.js, NOT here: SQLite
+     -- cannot express either, and a self-referencing FK would happily accept a loop.
+     -- ⚠️ Access INHERITS down this tree, which deliberately bends the default-deny-by-absence rule
+     -- in mesh_client_access. That is safe only because it is never silent — see whoGainsAccess().
+     parent_client_id TEXT,
+     created_at       INTEGER NOT NULL
    )`,
+  /* Idempotent, for anyone who booted this branch before nesting existed — CREATE TABLE IF NOT
+   * EXISTS would silently skip them and every hierarchy read would return undefined. */
+  `ALTER TABLE mesh_clients ADD COLUMN parent_client_id TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_mesh_clients_parent ON mesh_clients (parent_client_id)`,
 
   /* Who may see which client. ⚠️ DEFAULT DENY BY ABSENCE: no row means no visibility, so a new
    * client is invisible to everyone until someone is named. The alternative — visible-unless-denied

@@ -33,10 +33,18 @@ types — they are one node declaring different **capabilities**, connected by *
 
 All in `server/test/mesh-invariants.test.js`.
 
-**Hub-side access** is a separate concern with its own guards in `server/test/mesh-client-roles.test.js`:
-a client is invisible until someone is explicitly named on it, an unrecognised role grants nothing
-rather than falling back to the lowest one, and **no role may imply downward control** — a "full
-access" role would promise a capability I2 says does not exist.
+**Hub-side access** is a separate concern with its own guards in `server/test/mesh-client-roles.test.js`
+and `server/test/mesh-client-tree.test.js`:
+
+- A client is invisible until someone is explicitly named on it, **or inherits it from an ancestor**.
+- **Inherited access may never be silent.** Resolution always carries provenance (`direct` /
+  `inherited via X` / `platform-admin`), and `whoGainsAccess` discloses who will gain access *before*
+  a client is nested. This is the one place default-deny-by-absence is deliberately bent, and the
+  disclosure is what makes it acceptable.
+- An unrecognised role grants nothing and **stops the walk** — skipping it would hand the user the
+  broader inherited role and turn a typo into an escalation.
+- **No role may imply downward control.** A "full access" role would promise a capability I2 says
+  does not exist.
 
 ⏳ **I6 and I8 are stated but not yet guarded.** They are properties of transport, which does not
 exist until Phase 1 — there is nothing to assert against today, and a test that passes because the
