@@ -2,9 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # ⚠️ 2.0.0 IS LISTED ON PURPOSE. CI ran only on main and on PRs targeting it, so a long-lived
+    # release branch accumulated commits with no suite behind them — and this project has already
+    # been bitten twice by that shape: a green local run on one Node version while CI runs another,
+    # and a config-gated code path no test exercised taking production down. A branch nobody tests
+    # is a branch nobody can trust to merge.
+    branches: [main, 2.0.0]
   pull_request:
-    branches: [main]
+    branches: [main, 2.0.0]
   workflow_dispatch:
 
 permissions:
