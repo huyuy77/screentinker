@@ -307,3 +307,51 @@ test('⚠️ with the flag OFF there is no /mesh endpoint to reach (I1)', async 
     sock.close(); io.close(); await new Promise((r) => http.close(r));
   }
 });
+
+test('⚠️ END TO END: a denied field never crosses the wire', async () => {
+  /*
+   * The I10 property, proven on the actual socket rather than in a unit test. Filtering at the
+   * PARENT would look identical from the child's side and be worthless: the data would already have
+   * crossed into somebody else's process, and the client's only protection would be the good
+   * behaviour of a machine they do not control.
+   *
+   * So the child projects with lib/mesh/mirror.js BEFORE sending, and what arrives is checked for
+   * the absence of everything the grant did not cover.
+   */
+  const mirror = require('../lib/mesh/mirror');
+  const hub = await parent();                       // edge grants ['health'] only
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+
+    const deviceRow = {
+      id: 'dev-1', name: 'Reception', status: 'online', battery_level: 55,
+      hardware_serial: 'SN-77', ip_address: '80.51.0.7', local_ip: '10.0.0.5',
+      playlist_name: 'Autumn Promo', screenshot_url: '/uploads/screenshots/dev-1.jpg',
+    };
+
+    up.send(envelope.createEnvelope({
+      originNodeId: CHILD_ID, type: 'device-summary', bodyVersion: 1,
+      ancestry: [CHILD_ID], originTs: Date.now(),
+      body: mirror.projectDevice(deviceRow, hub.edge.grant_categories),
+    }));
+    await waitFor(() => hub.received.length === 1);
+
+    const body = hub.received[0].env.body;
+    assert.equal(body.id, 'dev-1', 'the identifier travels — a grant hides what a screen is, not that it exists');
+    assert.equal(body.battery_level, 55, 'and the granted health fields travel');
+
+    for (const denied of ['name', 'hardware_serial', 'ip_address', 'local_ip',
+                          'playlist_name', 'screenshot_url']) {
+      assert.ok(!(denied in body),
+        `"${denied}" reached the parent under a health-only grant — filtering is at the wrong end`);
+    }
+
+    // ⚠️ Belt and braces: the serialised frame must not contain the values either, in case a future
+    // projection nests them somewhere the key check would miss.
+    const wire = JSON.stringify(hub.received[0].env);
+    for (const secret of ['Reception', 'SN-77', '80.51.0.7', 'Autumn Promo']) {
+      assert.ok(!wire.includes(secret), `"${secret}" appeared in the frame sent to the parent`);
+    }
+  } finally { up.stop(); await hub.close(); }
+});

@@ -229,6 +229,14 @@ this staying maintainable by one person.
 
 ## Phase 2 — Upward aggregation
 
+> **Status.** Landed: grant-filtered projections at the source (`mirror.js`), backfill priority
+> (`backfill.js`), per-child circuit breaker (`circuit-breaker.js`), cross-node alert rollup
+> (`alert-rollup.js`). Opaque relay was proven in Phase 1 over the real wire.
+>
+> ⚠️ Remaining: the parent-side STORAGE of mirrored rows. The projections and the transport exist;
+> what a parent keeps, in which tables, and for how long per edge is the piece still to build —
+> `onEnvelope` currently marks the edge alive and hands off.
+
 - Telemetry, health, version, reachability mirrored upward, filtered by grant at the source.
 - Opaque relay implemented and tested with a deliberately unknown payload type.
 - Per-child circuit breaker, jittered backoff (#144 precedent).
