@@ -2314,7 +2314,13 @@
           client_ms: Date.now(),   // #group-sync: t1 for NTP-style clock discipline (echoed in the ack)
           telemetry: {
             battery_level: null,
-            battery_charging: false,
+            // ⚠️ null, NOT false. `false` asserts "this screen is on battery and is not
+            // charging" — a claim the web cannot make: Firefox removed the Battery Status API
+            // and Chrome gates it. Sending false made this the ONLY telemetry field populated on
+            // 100% of rows while battery_level sat at 36%, because every web player was
+            // fabricating one. Nothing displays it, so the lie was invisible — and mirroring it
+            // up a mesh would have spread it fleet-wide. null means unknown, which is true.
+            battery_charging: null,
             storage_free_mb: null,
             storage_total_mb: null,
             ram_free_mb: null,
