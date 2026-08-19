@@ -33,7 +33,7 @@ second has been collected for months and has never once been written. Date the c
 | `wifi_ssid` | 97.5% | all players | server, UI | yes | no | **no — 94% is not an SSID** | **drop** |
 | `local_ip` | 20.6% | players | server, UI | yes | no | yes | **keep** |
 | `local_ip6` | 4.6% | BrightSign | server, UI | yes | no | yes | **keep** |
-| `temperature_c` | **0.0%** | nobody | — | declared | no | never written | **drop** |
+| `temperature_c` | 0.0% *(see below)* | **BrightSign only** | server, UI | yes | no | yes | **keep** ⚠️ *corrected* |
 | `attached_display` | 0.002% | BrightSign only | server, UI | yes | no | yes — new 2026-08-10 | **keep** |
 | `video_mode` | 0.7% | BrightSign only | server, UI | yes | no | yes — new 2026-08-10 | **keep** |
 
@@ -80,6 +80,27 @@ This is the "battery reporting has been flagged as wrong or absent" suspicion in
 answer is *both, in different places*: **absent** on web (correctly — no API), **wrong** on web
 (`charging` fabricated), **correct** on Android (100% populated on every Android platform measured).
 
+### ⚠️ `temperature_c` — a correction to this document
+
+**This audit said "never written — drop". That was wrong, and it was acted on before being caught.**
+
+The field is **BrightSign-only**. It arrives from `deviceInfo.getTemperature()` in
+`brightsign/st-bridge.js`, added 2026-08-05 in *"BrightSign: real telemetry and hardware identity,
+not a block of nulls"*. It works.
+
+The measurement said 0 of 248,314 rows because **production has no BrightSign players** — the fleet
+is Chrome, Firefox, Tizen and Android. The zero measured the fleet, not the field.
+
+This is the exact trap warned about at the top of this document, applied correctly to `video_mode`
+and `attached_display` (both BrightSign, both kept) and missed for `temperature_c`, which is from the
+same family and the same week. The difference: those two were checked against `git log` and this one
+was not, because 0.0% felt conclusive in a way 0.7% did not.
+
+**The general lesson, which is the reason this section stays:** *a usage measurement is only as broad
+as the fleet you measured.* Before deleting a field for being unused, check that the platform which
+writes it is present in the sample. An exactly-zero reading deserves more suspicion than a small one,
+not less — it is as likely to mean "wrong sample" as "dead code".
+
 ### `cpu_usage` — keep, but round
 
 Stored at full float precision: `34.700234234333`, 87,297 distinct values across 248k rows. Nobody
@@ -114,14 +135,23 @@ written for.
 
 ## Falling out of this
 
+> **Status.** `wifi_ssid` is gone; `cpu_usage` is rounded at the source; `battery_charging` was fixed
+> earlier. Guarded by `server/test/telemetry-removals.test.js`, which carries the reasons — a removal
+> without a guard is only a deferral, and none of these reasons are visible from the code.
+>
+> ⚠️ **`temperature_c` was DROPPED AND THEN RESTORED. This audit got it wrong.** See the correction
+> below; it is left in place because the mistake is more instructive than the conclusion.
+
+
 1. **Drop `wifi_ssid`** — stop collecting, remove from the UI, retire the column.
 2. **Fix `battery_charging`** — `false` → `null` on web, with a test that population tracks
    `battery_level`.
 3. **Drop `temperature_c`** — never written by anything, in any player, since it was added.
 4. **Round `cpu_usage`** at the source.
 
-Items 1 and 3 are removals and must land before Phase 2. Item 2 is a correctness fix worth taking
-regardless of the mesh.
+All four are done. Items 1 and 3 were removals that the directive required before Phase 2; they
+slipped past it and were caught by an audit rather than by the plan, which is worth noting — a
+"must land before X" with nothing enforcing it is a note, not a gate.
 
 ## Grant vocabulary this implies (input to Phase 0)
 

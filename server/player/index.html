@@ -2330,7 +2330,10 @@
             // actively wrong — the one we have is PoE over Ethernet — and an operator reading it
             // as an SSID has been told something false. Null means "not on WiFi", which is true,
             // and the dashboard shows a real hardware block for this family instead.
-            wifi_ssid: ON_BRIGHTSIGN ? null : 'Web Player',
+            // wifi_ssid is GONE (Phase −1). 94% of its production values were not SSIDs at all
+            // — this line used to send the literal string "Web Player", 151,713 rows of it — and
+            // the 6% that WERE real were customer network names, which are geolocatable against
+            // public wardriving databases. Nothing read it and no feature needed it.
             wifi_rssi: null,
             uptime_seconds: Math.floor(performance.now() / 1000),
             // #74/#75: report OS timezone + UTC clock (effective-tz resolution + skew indicator)

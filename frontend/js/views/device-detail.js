@@ -10,12 +10,6 @@ import { frameDeviceOutput, displayAspectRatio } from '../lib/device-frame.js';
 // answer: Android 8.1+ refuses to reveal the SSID to an app without location permission, and a
 // customer reasonably read the blank as a bug in the player. "permission" means we are not
 // allowed to know; empty means there is genuinely no Wi-Fi (an Ethernet panel).
-function ssidLabel(ssid) {
-  if (ssid === 'permission') return esc(t('device.info.wifi_needs_location'));
-  if (!ssid) return '--';
-  return esc(ssid);
-}
-
 // #238: turn the Now Playing screenshot the way the wall mount turns the panel. The placeholder
 // ("no screenshot yet") is deliberately left alone — it is dashboard chrome, not device output.
 function frameNowPlaying() {
@@ -599,15 +593,17 @@ async function loadDevice(deviceId, activeTab = null) {
             </div>
           </div>` : ''}
           `}
+          <!-- The physical panel, from its EDID, and the mode the output is negotiated to. Shown
+               only when the player reports them, like every other card here: a family that cannot
+               read its own output must not grow an empty row. On a dual-output player each device
+               row is one output, so this is THAT output's screen — not the box's first. -->
+          <!-- ⚠️ BrightSign-only, like the two cards below. It renders for nobody on a fleet
+               with no BrightSign players, which is not the same as being unused. -->
           ${latestTelemetry.temperature_c != null ? `
           <div class="info-card">
             <div class="info-card-label">${t('device.info.temperature')}</div>
             <div class="info-card-value small" id="telTemp">${latestTelemetry.temperature_c}&deg;C</div>
           </div>` : ''}
-          <!-- The physical panel, from its EDID, and the mode the output is negotiated to. Shown
-               only when the player reports them, like every other card here: a family that cannot
-               read its own output must not grow an empty row. On a dual-output player each device
-               row is one output, so this is THAT output's screen — not the box's first. -->
           ${latestTelemetry.attached_display ? `
           <div class="info-card">
             <div class="info-card-label">${t('device.info.attached_display')}</div>
@@ -638,8 +634,11 @@ async function loadDevice(deviceId, activeTab = null) {
           ${device.android_version && !device.android_version.startsWith('Web/') ? `
           <div class="info-card">
             <div class="info-card-label">${t('device.info.wifi')}</div>
-            <div class="info-card-value small" id="telWifi">${ssidLabel(latestTelemetry.wifi_ssid)}</div>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:2px" id="telRssi">${latestTelemetry.wifi_rssi ? latestTelemetry.wifi_rssi + ' dBm' : ''}</div>
+            <!-- ⚠️ The network NAME is deliberately gone (Phase −1). An SSID is geolocatable
+                 against public wardriving databases, so it could place a customer's premises
+                 on a map — and 94% of the stored values were never SSIDs anyway. Signal
+                 strength stays: it is what an installer actually acts on. -->
+            <div class="info-card-value small" id="telRssi">${latestTelemetry.wifi_rssi != null ? latestTelemetry.wifi_rssi + ' dBm' : '--'}</div>
           </div>
           ` : ''}
           <div class="info-card">
@@ -2324,7 +2323,6 @@ function updateTelemetryDisplay(telemetry) {
   };
   if (telemetry.battery_level != null) update('telBattery', telemetry.battery_level + '%');
   if (telemetry.storage_free_mb) update('telStorage', t('device.info.size_free', { size: formatBytes(telemetry.storage_free_mb) }));
-  if (telemetry.wifi_ssid !== undefined) update('telWifi', ssidLabel(telemetry.wifi_ssid));
   if (telemetry.local_ip) update('telLocalIp', telemetry.local_ip);
   // update() no-ops when the card is absent, which is the case for a v4-only panel — a screen that
   // acquires a v6 address mid-session picks the card up on the next full render, not this path.

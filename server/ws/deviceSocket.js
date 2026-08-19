@@ -1221,9 +1221,9 @@ module.exports = function setupDeviceSocket(io) {
       if (telemetry && deviceExists(device_id)) {
         db.prepare(`
           INSERT INTO device_telemetry (device_id, battery_level, battery_charging, storage_free_mb, storage_total_mb,
-            ram_free_mb, ram_total_mb, cpu_usage, wifi_ssid, wifi_rssi, uptime_seconds, local_ip, local_ip6, temperature_c,
+            ram_free_mb, ram_total_mb, cpu_usage, wifi_rssi, uptime_seconds, local_ip, local_ip6, temperature_c,
             attached_display, video_mode)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           device_id,
           telemetry.battery_level ?? null,
@@ -1232,8 +1232,12 @@ module.exports = function setupDeviceSocket(io) {
           telemetry.storage_total_mb ?? null,
           telemetry.ram_free_mb ?? null,
           telemetry.ram_total_mb ?? null,
-          telemetry.cpu_usage ?? null,
-          telemetry.wifi_ssid ?? null,
+          // Rounded to one decimal at the source (Phase −1). It was stored at full float
+          // precision — 34.700234234333, 87,297 distinct values across 248k rows — and no
+          // surface has ever shown more than a whole percent. Free bandwidth on every mesh
+          // hop, and a smaller index, for a digit nobody can read.
+          typeof telemetry.cpu_usage === 'number' && Number.isFinite(telemetry.cpu_usage)
+            ? Math.round(telemetry.cpu_usage * 10) / 10 : null,
           telemetry.wifi_rssi ?? null,
           telemetry.uptime_seconds ?? null,
           // Device-supplied text headed for a column the dashboard renders: trim and cap it.
@@ -1242,10 +1246,14 @@ module.exports = function setupDeviceSocket(io) {
           // Same treatment for the v6 address. 45 is still the cap: it is the longest legitimate
           // IPv6 text form (an IPv4-mapped one, `::ffff:255.255.255.255`).
           typeof telemetry.local_ip6 === 'string' ? telemetry.local_ip6.trim().slice(0, 45) || null : null,
-          // Only a finite number is a reading. A panel with no sensor sends nothing, and NaN or
-          // Infinity from a flaky one must land as "no reading" rather than poisoning the column.
+          // ⚠️ BRIGHTSIGN-ONLY, which is exactly why it LOOKS unused. The Phase −1 audit
+          // measured this at 0 of 248,314 rows and nearly concluded it was dead — but
+          // production has no BrightSign players at all, so the zero measured the FLEET,
+          // not the field. It comes from deviceInfo.getTemperature() in st-bridge.js.
           typeof telemetry.temperature_c === 'number' && Number.isFinite(telemetry.temperature_c)
             ? telemetry.temperature_c : null,
+          // Only a finite number is a reading. A panel with no sensor sends nothing, and NaN or
+          // Infinity from a flaky one must land as "no reading" rather than poisoning the column.
           // Free text from the panel's EDID and the mode the output is driving. Trimmed and
           // bounded like the address fields above: this is a string the DISPLAY chose, not one
           // we control, and a monitor with a silly name must not be able to grow the row.

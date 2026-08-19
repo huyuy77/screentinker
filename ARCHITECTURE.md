@@ -25,7 +25,7 @@ types — they are one node declaring different **capabilities**, connected by *
 | **I3** | **No cycles.** Edges form a DAG (multi-parent is permitted). Refusal is a reachability check at enroll time, not a path-prefix check. | `test_cycle_refused_by_reachability_not_prefix` |
 | **I4** | **Identity is position-independent.** Node UUID generated locally at first boot. Re-parenting changes display paths only. | `test_node_id_encodes_no_position` |
 | **I5** | **Opaque relay.** An intermediate node forwards payloads it cannot parse, unmodified. It may read the envelope only. | `test_unknown_payload_is_relayed_not_dropped` |
-| **I6** | **Failure isolation.** One child — unreachable, flooding, ancient, skewed — never stalls a sweep, blocks a dashboard, or throws into a shared handler. | ⏳ Phase 1 (topology harness) |
+| **I6** | **Failure isolation.** One child — unreachable, flooding, ancient, skewed — never stalls a sweep, blocks a dashboard, or throws into a shared handler. | `THE ISOLATION PROPERTY`, `THE I6 CASE`, `a dead child stops being attempted` |
 | **I7** | **No phone home.** Pairing codes and UUIDs minted locally. No licence check, no activation, no beacon, no registry. Air-gapped is first-class. | `test_no_phone_home` |
 | **I8** | **Cloud is a peer.** screentinker.com is a node with no special privileges. | ⏳ Phase 1 (topology harness) |
 | **I9** | **No built-in relay address, no automatic relay fallback.** Relay is a capability at an operator-supplied address. A failed direct connection never silently reroutes. | `test_no_builtin_relay_address`, `test_no_automatic_relay_fallback` |
@@ -46,11 +46,16 @@ and `server/test/mesh-client-tree.test.js`:
 - **No role may imply downward control.** A "full access" role would promise a capability I2 says
   does not exist.
 
-⏳ **I6 and I8 are stated but not yet guarded.** They are properties of transport, which does not
-exist until Phase 1 — there is nothing to assert against today, and a test that passes because the
-code is absent is worse than no test, because it reads as coverage. The Phase 1 topology harness
-(spin N nodes, assemble arbitrary graphs, simulate failures) is where both become testable, and it is
-a Phase 1 *deliverable*, not an optional extra.
+⏳ **I8 is stated but still not guarded.** "Cloud is a peer" needs a test that stands up a hosted-
+shaped node and a self-hosted one and shows the relationship works identically in both directions —
+which the topology harness can now express but nothing yet asserts. It is the last unguarded
+invariant, and it is recorded here rather than quietly assumed.
+
+**I6 became testable once transport landed**, as predicted, and is now guarded three ways: a flooding
+child does not starve a quiet sibling (per-child backpressure), a dead child is skipped rather than
+waited on (circuit breaker), and a malformed payload from a remote writer cannot throw into the
+shared socket handler. `server/test/mesh-backpressure.test.js`, `mesh-topology.test.js`,
+`mesh-aggregation.test.js`.
 
 ### Why several guards are source-level, not behavioural
 
