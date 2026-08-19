@@ -23,8 +23,20 @@ const envelope = require('../../lib/mesh/envelope');
 const grants = require('../../lib/mesh/grants');
 const capabilities = require('../../lib/mesh/capabilities');
 const identity = require('../../lib/mesh/node-identity');
+const { Backpressure } = require('../../lib/mesh/backpressure');
 
 const DEFAULT_VERSION = '2.0.0';
+
+/*
+ * Window and cap for the harness's per-child budgets.
+ *
+ * ⚠️ DECLARED ABOVE THE CLASS THAT USES THEM. They were originally at the foot of the file, which
+ * happens to work — a constructor runs after module evaluation — but this codebase has already taken
+ * production down once with a temporal-dead-zone reference that looked equally harmless. Const
+ * ordering is not worth being clever about.
+ */
+const INGEST_LIMIT = 100;
+const INGEST_WINDOW_MS = 1000;
 
 class Node {
   constructor(mesh, { id, version = DEFAULT_VERSION, clockSkewMs = 0, acceptEnrollment = true,
@@ -44,7 +56,11 @@ class Node {
     this.relayed = [];            // envelopes forwarded without being understood
     this.refusals = [];           // {from, reason}
     this.reachable = true;        // flip to simulate an unreachable node
-    this.ingest = { count: 0, windowStart: 0, throttled: 0 };
+    // ⚠️ PER CHILD, not one shared budget — see lib/mesh/backpressure.js. A shared budget
+    // lets the loudest child silence every quiet sibling, which is the I6 violation the
+    // earlier version of this harness demonstrated.
+    this.backpressure = new Backpressure({ windowMs: INGEST_WINDOW_MS, maxMessages: INGEST_LIMIT });
+    this.throttled = 0;
   }
 
   now() { return this.mesh.now() + this.clockSkewMs; }
@@ -195,10 +211,12 @@ class Mesh {
     if (!parent) return { delivered, blocked: 'parent missing' };
     if (!parent.reachable) return { delivered, blocked: 'parent unreachable' };
 
-    // Backpressure: a child is an authenticated remote writer on a version you do not control.
-    if (!parent._admit(this.now())) {
-      parent.ingest.throttled++;
-      return { delivered, blocked: 'throttled' };
+    // Backpressure, accounted against the SENDING CHILD so one flood cannot starve its siblings.
+    const size = JSON.stringify(env).length;
+    const admit = parent.backpressure.admit(fromNode.id, size, this.now());
+    if (!admit.ok) {
+      parent.throttled++;
+      return { delivered, blocked: 'throttled', limit: admit.limit, reason: admit.reason };
     }
 
     /*
@@ -223,17 +241,5 @@ class Mesh {
     return this._forward(parent, stamped, category, delivered);
   }
 }
-
-/** Simple fixed-window ingest cap, so one flooding child cannot starve the others (I6). */
-const INGEST_LIMIT = 100;
-const INGEST_WINDOW_MS = 1000;
-Node.prototype._admit = function admit(nowMs) {
-  if (nowMs - this.ingest.windowStart >= INGEST_WINDOW_MS) {
-    this.ingest.windowStart = nowMs;
-    this.ingest.count = 0;
-  }
-  this.ingest.count++;
-  return this.ingest.count <= INGEST_LIMIT;
-};
 
 module.exports = { Mesh, Node, DEFAULT_VERSION, INGEST_LIMIT, INGEST_WINDOW_MS };

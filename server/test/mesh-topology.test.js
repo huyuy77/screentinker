@@ -97,10 +97,10 @@ test('CASE: parent unreachable — the child keeps running and nothing is lost u
 test('CASE: child flood — one noisy child is throttled, not accepted', () => {
   /*
    * A child is an authenticated remote writer running a version you do not control. This is the July
-   * unbounded-widget-telemetry lesson, except remote.
+   * unbounded-widget-telemetry lesson, except the writer is on somebody else's machine.
    */
   const m = new Mesh();
-  m.addNode('hub');
+  const hub = m.addNode('hub');
   m.addNode('loud');
   m.enroll('loud', 'hub');
 
@@ -109,18 +109,27 @@ test('CASE: child flood — one noisy child is throttled, not accepted', () => {
     if (m.emit('loud').delivered.length) delivered++;
   }
   assert.equal(delivered, INGEST_LIMIT, 'accepted up to the cap and no further');
-  assert.ok(m.nodes.get('hub').ingest.throttled > 0, 'the excess is counted, not silently dropped');
+  assert.ok(hub.throttled > 0, 'the excess is counted, not silently dropped');
+
+  // ⚠️ Refusals are attributed and counted per child, so "throttled 40,000 times since Tuesday" is
+  // distinguishable from "throttled twice" — a different conversation, and the UI needs both.
+  const st = hub.backpressure.statusFor('loud', m.now());
+  assert.equal(st.throttled, true);
+  assert.ok(st.refused.rate > 0, 'and the operator can see WHICH limit was hit');
 });
 
-test('CASE: child flood does not starve a quiet sibling (I6)', () => {
+test('CASE: THE I6 CASE — a flooding child does not starve a quiet sibling', () => {
   /*
-   * ⚠️ THE ONE THAT MATTERS. A cap that is shared between children means the loudest child silences
-   * every other one — the failure looks like "the mesh is broken" rather than "that node is noisy".
+   * ⚠️ THIS TEST PREVIOUSLY ASSERTED THE OPPOSITE, on purpose.
    *
-   * This currently FAILS to isolate, because the harness models a single ingest window per parent.
-   * Asserting the real requirement here rather than the current behaviour would be writing a test to
-   * pass; asserting the current behaviour documents the gap honestly and it is fixed with per-child
-   * accounting when transport lands.
+   * The harness modelled a single shared budget on the parent, so a flood DID silence every sibling.
+   * Rather than assert the requirement and watch it fail, the test asserted the broken behaviour with
+   * a comment saying it would fail loudly the moment per-child accounting landed. It just did, which
+   * is why this now reads the right way round — the gap could not be quietly forgotten.
+   *
+   * A shared budget is the obvious implementation and it is an I6 violation: one noisy site takes out
+   * visibility of every other site, and the operator sees "the mesh is down" rather than "that node
+   * is noisy".
    */
   const m = new Mesh();
   const hub = m.addNode('hub');
@@ -128,18 +137,15 @@ test('CASE: child flood does not starve a quiet sibling (I6)', () => {
   m.enroll('loud', 'hub');
   m.enroll('quiet', 'hub');
 
-  for (let i = 0; i < INGEST_LIMIT + 10; i++) m.emit('loud');
-  const quietGotThrough = m.emit('quiet').delivered.length > 0;
+  for (let i = 0; i < INGEST_LIMIT + 100; i++) m.emit('loud');
 
-  assert.equal(quietGotThrough, false,
-    'KNOWN GAP: the cap is per-parent, so a flood does starve a sibling. Per-child accounting is a ' +
-    'transport-phase fix; this assertion exists to fail loudly when it is made, so it is not ' +
-    'forgotten.');
+  assert.ok(m.emit('quiet').delivered.length > 0,
+    'a quiet sibling must be unaffected by a flood on another edge');
 
-  // The window is fixed, so the sibling recovers on the next one rather than being locked out.
-  m.advance(1100);
-  assert.ok(m.emit('quiet').delivered.length > 0, 'and it recovers on the next window');
-  assert.ok(hub.ingest.throttled > 0);
+  assert.equal(hub.backpressure.statusFor('loud', m.now()).throttled, true);
+  assert.equal(hub.backpressure.statusFor('quiet', m.now()).throttled, false);
+  assert.deepEqual(hub.backpressure.throttledChildren(m.now()), ['loud'],
+    'only the offending child is degraded, and it is named');
 });
 
 test('CASE: version skew — a node below the floor cannot enroll', () => {

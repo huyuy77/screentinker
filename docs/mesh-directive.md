@@ -207,10 +207,16 @@ explicit purge. A node losing its parent reverts to standalone silently and buff
 it can see, when it last synced, and a revoke button. An MSP link the client cannot see or sever is a
 contract dispute waiting to happen — and visibility is what makes a client comfortable agreeing.
 
-> **Status (partial).** Landed: pairing (code mint/burn/expiry, enrollment validation, edge tokens),
-> revocation semantics, and the **topology harness** with the failure cases below. Still to come:
-> real transport wiring, per-child backpressure accounting, disenrollment UI, and consent-visible-
-> from-below. See `server/lib/mesh/pairing.js` and `server/test/helpers/mesh-topology.js`.
+> **Status.** Landed: pairing (`pairing.js`), revocation and disenrollment semantics + consent-from-
+> below (`edge-status.js`), per-child backpressure (`backpressure.js`), and the **topology harness**
+> (`test/helpers/mesh-topology.js`) covering the failure cases below.
+>
+> ⚠️ **Remaining: transport wiring — and it is BLOCKED on a dependency decision.** Dialling a parent
+> needs a socket.io *client* on the server, and `socket.io-client` is currently **dev-only** in the
+> lockfile (`dev: true`). Code requiring it would pass every test here and then crash on a production
+> `npm ci --omit=dev` — the same shape as the config-gated TDZ crash that took prod down. It must be
+> promoted to a production dependency (MIT, same authors as `socket.io`) deliberately, since that
+> moves the licence gate and the SBOM, before any transport code is written.
 
 ### Topology test harness — a Phase 1 deliverable, not optional
 Spin N nodes in CI, assemble arbitrary graphs, and simulate: parent unreachable, half-open socket,
