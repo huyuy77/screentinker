@@ -329,6 +329,21 @@ Store UTC, carry origin timezone on the row, and let the **view** choose the buc
 
 ---
 
+## Batching (designed, not built)
+
+The report cycle sends one envelope per device — 402 messages for a 400-screen child, every 60
+seconds. Measured, batching beats per-message compression by 17× on a cycle and 92× on backfill, and
+costs less CPU. It is also the difference between a reconnecting child draining its buffer in seconds
+and being throttle-bound for ~83 of them.
+
+See **`docs/mesh-batching-design.md`**. The decisions that make it a protocol change rather than a
+tuning knob: capability negotiation (an older parent would relay-and-not-store a batch *silently*),
+per-item attestation and per-item outcomes (I6 — one bad payload costs one bad payload), item-count
+backpressure (or batching becomes a way around the rate limit), and alerts staying unbatched because
+latency is the point of an alert.
+
+---
+
 ## Phase 4 — Depth unlock
 
 > **Status: built, NOT unlocked.** Multi-hop relay, deep skew, subtree re-parenting and aggregate
