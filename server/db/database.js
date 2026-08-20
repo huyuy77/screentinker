@@ -744,6 +744,17 @@ const migrations = [
    * sometimes a digest is how one gets logged. */
   'ALTER TABLE mesh_edges ADD COLUMN up_token TEXT',
 
+  /* ⚠️ What this server calls the peer on the other end of this edge — a NAME, not a UUID.
+   * "another server" is what the UI said before, which is true of every row and therefore tells an
+   * operator nothing; a node id tells them less. The peer declares a name when it pairs and this
+   * side stores it, so the switcher can read "Acme HQ" where it used to read "another server". */
+  'ALTER TABLE mesh_edges ADD COLUMN peer_name TEXT',
+
+  /* This server's OWN friendly name, which is what it declares when pairing. Defaults to the host
+   * name because that is the thing an operator already recognises; editable, because hostnames are
+   * frequently neither stable nor meaningful. */
+  'ALTER TABLE mesh_node ADD COLUMN node_name TEXT',
+
   /* Pairing codes — short-lived, single-use, burned on redemption.
    *
    * ⚠️ A ROW PER CODE WITH AN EXPLICIT burned_at, not a delete. A redeemed code that vanishes cannot

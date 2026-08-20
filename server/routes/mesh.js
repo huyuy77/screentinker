@@ -136,6 +136,69 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     res.json({ nodes: out, total: out.length, asOf: now });
   });
 
+  /**
+   * GET /api/mesh/orgs — connected servers presented as ORGS this operator can select.
+   *
+   * ⚠️ THE MODEL SHIFT THAT MAKES THE REST OF THE UI WORK. Earlier the position was that remote
+   * workspaces must never enter the workspace switcher, because the switcher assumes a local
+   * WRITABLE workspace and every write surface would grow a disabled state — "a UI full of dead
+   * controls teaches people the product is broken."
+   *
+   * That objection is answered by making the controls not dead: a write against a remote org is
+   * relayed to the server that owns it, over the link that already exists. Once writes work,
+   * selecting a remote org is exactly like selecting a local one, and keeping it out of the
+   * switcher becomes the arbitrary choice. Until the downward channel lands (I2) the selection is
+   * READ-ONLY and the UI says so — which is a caveat on one banner rather than a disabled state on
+   * every button.
+   *
+   * Named after the CLIENT where one exists, because "Acme Retail" is what an operator calls that
+   * site; a node UUID is what the machine calls itself and nobody else ever does.
+   */
+  router.get('/orgs', requireAuth, (req, res) => {
+    const now = nowSec();
+    const ids = visibleNodeIds(req.user);
+    if (!ids.length) return res.json({ orgs: [] });
+
+    const marks = ids.map(() => '?').join(',');
+    const counts = new Map(db.prepare(
+      `SELECT origin_node_id,
+              COUNT(*) AS total,
+              SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) AS online
+         FROM mesh_mirror_devices
+        WHERE origin_node_id IN (${marks}) AND deleted_at IS NULL
+        GROUP BY origin_node_id`).all(...ids).map((r) => [r.origin_node_id, r]));
+
+    res.json({
+      orgs: ids.map((id) => {
+        const edge = edgeFor(id);
+        const client = edge && edge.client_id
+          ? db.prepare('SELECT name FROM mesh_clients WHERE id = ?').get(edge.client_id) : null;
+        const c = counts.get(id) || { total: 0, online: 0 };
+        const fresh = require('../lib/mesh/mirror-store').freshnessOf(edge, now);
+        return {
+          nodeId: id,
+          clientId: edge ? edge.client_id : null,
+          name: (client && client.name) || edge?.peer_name || `Server ${String(id).slice(0, 8)}`,
+          /*
+           * ⚠️ The SERVER's own name, separate from the client it is filed under. The switcher used
+           * to sub-title every remote org "another server", which is true of all of them and so
+           * distinguishes none of them — and a node id distinguishes them only in principle. The
+           * peer declares this when it pairs.
+           */
+          serverName: (edge && edge.peer_name) || null,
+          deviceCount: c.total,
+          // ⚠️ null when the link is stale, never 0 — see the note on nodeRollup. A remote org
+          // showing "0 online" in a switcher is a claim that the site is dark.
+          devicesOnline: fresh === 'stale' ? null : (c.online || 0),
+          stale: fresh === 'stale',
+          // The honest state of the feature, sent rather than assumed by the client: this server
+          // can read the org but cannot yet write to it.
+          writable: false,
+        };
+      }),
+    });
+  });
+
   /** GET /api/mesh/devices — the aggregated cross-node screens view. */
   router.get('/devices', requireAuth, (req, res) => {
     const now = nowSec();

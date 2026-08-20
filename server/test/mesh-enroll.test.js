@@ -26,13 +26,15 @@ function freshDb() {
   const db = new Database(path.join(dir, 'e.db'));
   db.exec(`
     CREATE TABLE mesh_node (singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-      node_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, self_device_id TEXT);
+      node_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, self_device_id TEXT,
+      node_name TEXT);
     CREATE TABLE mesh_edges (id TEXT PRIMARY KEY, peer_node_id TEXT NOT NULL, direction TEXT NOT NULL,
       role_capabilities TEXT DEFAULT '[]', grant_categories TEXT DEFAULT '[]',
       transport_direction TEXT, retention_days INTEGER, tombstone_purge_days INTEGER,
       tls_verify INTEGER DEFAULT 1, peer_version TEXT, peer_min_version TEXT, token_hash TEXT,
       token_expires_at INTEGER, client_id TEXT, created_at INTEGER, last_sync_at INTEGER,
-      revoked_at INTEGER, peer_url TEXT, up_token TEXT, UNIQUE (peer_node_id, direction));
+      revoked_at INTEGER, peer_url TEXT, up_token TEXT, peer_name TEXT,
+      UNIQUE (peer_node_id, direction));
     CREATE TABLE mesh_pairing_codes (id TEXT PRIMARY KEY, code TEXT NOT NULL,
       role_capabilities TEXT DEFAULT '[]', grant_categories TEXT DEFAULT '[]', client_id TEXT,
       retention_days INTEGER, created_by TEXT, created_at INTEGER NOT NULL,

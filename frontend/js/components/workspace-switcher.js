@@ -64,12 +64,59 @@ function wireAdminIcons(scope, list) {
 //   - 0 accessible workspaces: muted "No workspace" placeholder
 //   - 1 accessible workspace: workspace name as static text
 //   - >1 accessible workspaces: dropdown button + menu with click-to-switch
-export function renderWorkspaceSwitcher(me) {
+/*
+ * ⚠️ REMOTE ORGS APPEAR HERE ALONGSIDE LOCAL ONES, which reverses an earlier decision worth
+ * recording rather than quietly overwriting.
+ *
+ * The old position: remote workspaces must never enter this switcher, because switching mints a JWT
+ * with current_workspace_id and reloads — it assumes a LOCAL, WRITABLE workspace — so every write
+ * surface would grow a disabled state, and a UI full of dead controls teaches people the product is
+ * broken.
+ *
+ * What changed is not the risk but the destination: writes against a remote org will be relayed to
+ * the server that owns it over the link that already exists. Once the controls work, keeping the
+ * org out of the switcher is the arbitrary choice, and making an operator go to a different screen
+ * to look at one customer instead of another is the thing that actually feels broken.
+ *
+ * ⚠️ SELECTING ONE DOES NOT MINT A JWT. There is no local workspace row to put in a token. The
+ * selection is a client-side mode, stored here and read by the views; the token keeps pointing at
+ * whatever local workspace it did. That also means signing out or expiring cannot strand somebody
+ * "inside" a server they no longer have access to.
+ */
+export const REMOTE_ORG_KEY = 'st_remote_org';
+
+export function selectedRemoteOrg() {
+  try { return JSON.parse(localStorage.getItem(REMOTE_ORG_KEY) || 'null'); } catch (e) { return null; }
+}
+
+export function clearRemoteOrg() {
+  localStorage.removeItem(REMOTE_ORG_KEY);
+}
+
+export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
   const container = document.getElementById('workspaceSwitcher');
   if (!container) return;
 
-  const list = Array.isArray(me?.accessible_workspaces) ? me.accessible_workspaces : [];
-  const currentId = me?.current_workspace_id || null;
+  const local = Array.isArray(me?.accessible_workspaces) ? me.accessible_workspaces : [];
+  const remote = (remoteOrgs || []).map((o) => ({
+    id: `remote:${o.nodeId}`,
+    name: o.name,
+    remote: true,
+    nodeId: o.nodeId,
+    stale: !!o.stale,
+    writable: !!o.writable,
+    device_count: o.deviceCount,
+    /*
+     * ⚠️ The SERVER'S NAME, not the words "another server". Every remote row was subtitled the
+     * same way, which distinguishes none of them — and an MSP switching between customers is
+     * choosing among rows that all looked alike. The name is declared by the peer at pairing.
+     */
+    organization_name: (o.serverName || `server ${String(o.nodeId).slice(0, 8)}`) +
+                       (o.stale ? ' · not reachable' : ''),
+  }));
+  const list = [...local, ...remote];
+  const picked = selectedRemoteOrg();
+  const currentId = picked ? `remote:${picked.nodeId}` : (me?.current_workspace_id || null);
 
   if (list.length === 0) {
     container.classList.remove('open');
@@ -130,7 +177,10 @@ export function renderWorkspaceSwitcher(me) {
             <polyline points="20 6 9 17 4 12"/>
           </svg>
           <div class="ws-meta">
-            <div class="ws-name">${esc(w.name)}</div>
+            <div class="ws-name">${esc(w.name)}${w.remote
+              // ⚠️ Marked, always. An operator acting on the wrong customer's screens because two
+              // rows looked identical is the failure this one character prevents.
+              ? ' <span class="badge" style="font-size:9px;vertical-align:middle">remote</span>' : ''}</div>
             <div class="ws-org">${subtitle}</div>
           </div>
           ${adminIconsHtml(w)}
@@ -147,6 +197,38 @@ export function renderWorkspaceSwitcher(me) {
   // Shared switch action (used by click and keyboard Enter).
   async function switchTo(wsId) {
     if (wsId === currentId) { container.classList.remove('open'); return; }
+
+    /*
+     * ⚠️ A remote org is a client-side mode, not a token change. There is no local workspace row to
+     * name in a JWT, and inventing one would put a workspace id in a token that resolves to nothing
+     * on this server — which fails later, somewhere else, as a permissions error nobody can explain.
+     */
+    if (String(wsId).startsWith('remote:')) {
+      const org = (remoteOrgs || []).find((o) => `remote:${o.nodeId}` === wsId);
+      if (!org) return;
+      localStorage.setItem(REMOTE_ORG_KEY, JSON.stringify(org));
+      window.location.reload();
+      return;
+    }
+    /*
+     * ⚠️ LEAVING A REMOTE ORG IS NOT ALWAYS A WORKSPACE SWITCH, and treating it as one broke the
+     * dropdown. While a remote org is selected, `currentId` is `remote:…`, so picking your own
+     * workspace looked like a change — but the JWT was already pointing at it, so this asked the
+     * server to switch to the workspace it was already on. That call does not return a new token,
+     * and the click did nothing at all: the local workspace became unselectable for as long as a
+     * remote org was active.
+     *
+     * Dropping the mode IS the whole action in that case. The order matters too: clear before the
+     * reload, or the local workspace renders under the remote banner and an operator is looking at
+     * their own data labelled as somebody else's.
+     */
+    const wasRemote = !!picked;
+    clearRemoteOrg();
+    if (wasRemote && wsId === (me?.current_workspace_id)) {
+      window.location.reload();
+      return;
+    }
+
     try {
       const resp = await api.switchWorkspace(wsId);
       if (resp?.token) {

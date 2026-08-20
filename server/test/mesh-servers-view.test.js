@@ -1,12 +1,19 @@
 'use strict';
 
 /*
- * The Servers section: that it is wired in, and that it makes the promises the directive requires.
+ * The mesh surfaces in the UI: the Servers section, the centralized alerts on Activity, the uptime
+ * report under Reports, and remote orgs in the workspace switcher.
  *
- * Source assertions rather than a rendered DOM, for the same reason as the invariant tests: what is
- * being protected here is largely ABSENCE — that remote workspaces never enter the workspace
- * switcher, that a stale link is not painted red, that the origin node is not folded into the name.
- * A rendering test can only show that the cases somebody thought of came out right.
+ * Source assertions rather than a rendered DOM, for the same reason as the invariant tests: most of
+ * what is protected here is ABSENCE — that a remote row offers no action it cannot perform, that a
+ * stale link is not painted red, that coverage is never rendered smaller than uptime.
+ *
+ * ⚠️ AND A STANDING CAVEAT ON THIS WHOLE FILE. Source-level tests cannot see whether the page
+ * WORKS. This view once shipped calling `api.get()`, which did not exist, and using
+ * `class="data-table"`, which no stylesheet defines — so the section threw on render and, once that
+ * was fixed, rendered completely unstyled. Twelve tests here passed throughout. They check that the
+ * code says the right things; frontend-api-contract.test.js checks the callees exist; only opening
+ * the page checks the rest.
  */
 
 const { test } = require('node:test');
@@ -16,8 +23,25 @@ const path = require('node:path');
 
 const front = (...p) => fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', ...p), 'utf8');
 const VIEW = front('js', 'views', 'servers.js');
+const ACTIVITY = front('js', 'views', 'activity.js');
+const REPORTS = front('js', 'views', 'reports.js');
+const SWITCHER = front('js', 'components', 'workspace-switcher.js');
+const DASHBOARD = front('js', 'views', 'dashboard.js');
 const APP = front('js', 'app.js');
 const INDEX = front('index.html');
+
+/*
+ * ⚠️ Comments stripped, for assertions about what the code DOES. A guard that greps the raw file
+ * matches the comment explaining why something is avoided just as happily as the thing itself —
+ * so a file that says "we deliberately do not use data-table" fails a test asserting it does not
+ * use data-table. That is how a correct guard gets deleted for being "wrong".
+ */
+const code = (src) => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '')
+  .replace(/<!--[\s\S]*?-->/g, '');
+
+/* ===================== the Servers section ===================== */
 
 test('the view is registered, routed and reachable', () => {
   assert.match(APP, /import \* as servers from '\.\/views\/servers\.js'/);
@@ -31,8 +55,8 @@ test('⚠️ the nav item is ASKED for, not assumed', () => {
   /*
    * There is no client-side flag for MESH_ACCEPT_ENROLLMENT and there should not be: the server
    * mounts /api/mesh only when it is set, so whether the API answers IS the test. A hardcoded flag
-   * in the bundle would drift the moment somebody changed the env var, and would show a section that
-   * 404s.
+   * in the bundle would drift the moment somebody changed the env var, and would show a section
+   * that 404s.
    */
   assert.match(INDEX, /id="serversNavItem" style="display:none"/,
     'it must start hidden, so an ordinary install never flashes a section it does not have');
@@ -40,23 +64,16 @@ test('⚠️ the nav item is ASKED for, not assumed', () => {
     'and be revealed only when the hub API actually answers');
 });
 
-test('⚠️ remote workspaces do NOT enter the workspace switcher', () => {
+test('⚠️ tables use the HOUSE style, not an invented class', () => {
   /*
-   * The switcher mints a JWT with current_workspace_id and reloads — it assumes a LOCAL, WRITABLE
-   * workspace. Putting remote ones behind it means every write surface grows a disabled state, and a
-   * UI full of dead controls teaches people the product is broken.
+   * This view shipped using `class="data-table"`, which exists in no stylesheet — so every table
+   * rendered with no padding, no header rule and its columns bunched against the left edge while
+   * two thirds of the row sat empty. Perfectly well-formed markup referring to a class nobody had
+   * written, which is exactly what a source test cannot notice on its own.
    */
-  /*
-   * ⚠️ Checked against the CODE, not the file. The doc comment at the top of the view explains why
-   * the switcher is avoided, and matching that would fail the test for saying the right thing —
-   * which is how a guard gets deleted for being "wrong" when it was the check that was wrong.
-   */
-  const code = VIEW
-    .replace(/\/\*[\s\S]*?\*\//g, '')     // block comments
-    .replace(/^\s*\/\/.*$/gm, '')          // line comments
-    .replace(/<!--[\s\S]*?-->/g, '');       // html comments in the templates
-  assert.doesNotMatch(code, /workspaceSwitcher|current_workspace_id|switchWorkspace/,
-    'the Servers view must never touch the workspace switcher');
+  assert.doesNotMatch(code(VIEW), /class="data-table"/, 'data-table is not a real class');
+  assert.match(VIEW, /class="table-wrap"/, 'the house wrapper supplies horizontal scroll');
+  assert.match(VIEW, /border-collapse:collapse/, 'and the table is styled inline like every other');
 });
 
 test('⚠️ a stale link is AMBER, never red', () => {
@@ -73,25 +90,35 @@ test('⚠️ a stale link is AMBER, never red', () => {
 
 test('⚠️ every row shows its age, not just the stale ones', () => {
   // A green dot from ninety minutes ago is a lie by omission, and the reader cannot tell.
-  assert.match(VIEW, /function statusCell[\s\S]{0,600}asOfAgeSec/,
+  assert.match(VIEW, /function statusCell[\s\S]{0,900}asOfAgeSec/,
     'the age belongs in the shared status cell, so no row can be rendered without it');
 });
 
-test('⚠️ the origin node is its own column, not folded into the name', () => {
+test('⚠️ the origin server is its own column, not folded into the name', () => {
   // "Lobby (Acme)" breaks sort and search for every row at once, and is hard to undo once customers
   // have learned to read it that way.
-  assert.match(VIEW, /<th>Server<\/th>/, 'the server gets its own column header');
-  assert.match(VIEW, /<td>\$\{idBadge\(d\.originNodeId\)\}<\/td>/, 'and its own badge cell');
+  assert.match(VIEW, /'Screen', 'Server', 'Status'/, 'the server gets its own column header');
+  assert.match(VIEW, /\$\{idBadge\(d\.originNodeId\)\}/, 'and its own cell');
   assert.doesNotMatch(VIEW, /\$\{d\.name\}\s*\(\$\{d\.originNodeId/, 'never concatenated');
+});
 
+test('⚠️ node ids are shortened for display but stay recoverable', () => {
   /*
-   * ⚠️ Shortened for display, with the FULL id still present. A node id is a UUID and a full one in
-   * every row pushes the columns an operator actually reads off the screen, for something no human
-   * distinguishes by eye. It has to stay recoverable though — hence the title attribute — because
-   * when somebody does need the id, they need all of it.
+   * A UUID in every row pushes the columns an operator actually reads off the screen, for something
+   * nobody distinguishes by eye. It still has to be recoverable when somebody genuinely needs it.
    */
   assert.match(VIEW, /const shortId = \(id\) => \(id \? String\(id\)\.slice\(0, 8\)/);
   assert.match(VIEW, /title="\$\{esc\(id\)\}"/, 'the full id must survive on hover');
+});
+
+test('⚠️ THE DEEP LINK IS GONE, deliberately', () => {
+  /*
+   * It was what made a read-only hub useful while remote objects were a dead end here. Now that a
+   * remote org can be selected locally, sending an operator to another server under a different
+   * login is strictly worse — and it would be the path people took, because it sat on the row.
+   */
+  assert.doesNotMatch(VIEW, /Open on its server/);
+  assert.doesNotMatch(VIEW, /deepLink/);
 });
 
 test('a device with no shared name says so rather than rendering blank', () => {
@@ -116,37 +143,47 @@ test('a new search returns to the first page', () => {
   assert.match(VIEW, /state\.search = e\.target\.value;[\s\S]{0,120}state\.offset = 0/);
 });
 
-test('acting on something remote is a link to where it lives', () => {
+test('⚠️ MINTING AND REPORTING UPWARD ARE SEPARATE, and gated separately', () => {
   /*
-   * ⚠️ This is what lets the hub stay read-only and still be useful. Without it every remote row is
-   * a dead end, and the only way to act is to widen the hub's permissions — which is how a read-only
-   * observer becomes a control plane by accident.
+   * They are opposite directions behind different flags, used by different people at different
+   * times. Bundled into one "Connect" tab, a hub — which can only ever do the first — grew a tab
+   * whose second half read "this server is not configured for that", which is a dead end an
+   * operator opens once and then distrusts the whole section for.
+   *
+   * Minting is a HEADER ACTION, like adding a display: on a hub it is the ordinary next thing to do
+   * on this page. The tab is the report-upward side only.
+   *
+   * ⚠️ The existing-uplink case is NOT optional. A link that exists must stay visible and severable
+   * from below, or turning MESH_ALLOW_UPLINK off afterwards would be a way to hide an MSP
+   * relationship from the client subject to it.
    */
-  assert.match(VIEW, /d\.deepLink/);
-  assert.match(VIEW, /target="_blank" rel="noopener"/, 'and it opens away from the hub safely');
+  assert.match(VIEW, /const showConnect = connect\.canEnroll \|\| \(connect\.uplinks \|\| \[\]\)\.length > 0/,
+    'the tab follows the uplink flag, never the mint flag');
+  assert.match(VIEW, /api\.get\('\/mesh\/capabilities'\)/,
+    'the flags are asked for, never duplicated into the bundle');
+  assert.match(VIEW, /\$\{connect\.canMint \?[\s\S]{0,160}connectServerBtn/,
+    'minting is a header button, gated on its own flag');
+  assert.match(VIEW, /\$\{caps\.canEnroll \?/, 'and the uplink half on its own');
+  assert.doesNotMatch(code(VIEW), /caps\.canMint/,
+    'the tab body must no longer contain the mint half at all');
 });
 
-test('⚠️ the view never writes to anything REMOTE (I2)', () => {
+test('⚠️ mesh writes address LOCAL administration only (I2)', () => {
   /*
-   * ⚠️ REFINED, NOT RELAXED, when enrollment landed. I2 is "there is no downward channel to write
-   * over" — the hub cannot change what plays on somebody else's screens. It was expressed as "this
-   * file contains no api.post at all", which was true and became wrong for the wrong reason:
-   * generating a pairing code and connecting this server to a parent are writes to THIS node's own
-   * configuration, performed by its own instance owner. Banning the verb outright would push that
-   * administration onto some other screen without making anything safer.
-   *
-   * So the guard is now about the TARGET. Every write must address a local administration endpoint;
-   * nothing may write to a mirrored collection.
+   * I2 is "there is no downward channel to write over" — this server cannot change what plays on
+   * somebody else's screens. Minting a code and connecting this server to a parent are writes to
+   * THIS node's own configuration by its own instance owner, so the guard is about the TARGET
+   * rather than the verb.
    */
-  const LOCAL_WRITE_PATHS = ['/mesh/pair/code', '/mesh/uplink'];
+  const LOCAL = ['/mesh/pair/code', '/mesh/uplink'];
   const writes = [...VIEW.matchAll(/api\.(post|put|patch|delete)\(\s*[`'"]([^`'"$]*)/g)]
     .map((m) => ({ verb: m[1], path: m[2] }));
-  assert.ok(writes.length > 0, 'the enrollment tab does write something');
+  assert.ok(writes.length > 0, 'the Connect tab does write something');
   for (const w of writes) {
-    assert.ok(LOCAL_WRITE_PATHS.some((p) => w.path.startsWith(p)),
+    assert.ok(LOCAL.some((p) => w.path.startsWith(p)),
       `api.${w.verb} to "${w.path}" — a write outside local administration`);
   }
-  for (const remote of ['/mesh/nodes', '/mesh/devices', '/mesh/alerts', '/mesh/uptime', '/mesh/topology']) {
+  for (const remote of ['/mesh/nodes', '/mesh/devices', '/mesh/orgs', '/mesh/topology']) {
     for (const verb of ['post', 'put', 'patch', 'delete']) {
       assert.ok(!new RegExp(`api\\.${verb}\\(\\s*[\`'"]${remote}`).test(VIEW),
         `${verb} to ${remote} — mirrored data is read-only`);
@@ -154,53 +191,11 @@ test('⚠️ the view never writes to anything REMOTE (I2)', () => {
   }
 });
 
-/* ===================== Phase 3 completion: the inbox, topology and report tabs ===================== */
-
-test('⚠️ four TABS, not four nav items', () => {
-  /*
-   * Alerts, topology and uptime are all answers about the same set of connected servers. A nav that
-   * grows an entry per question buries the section an operator starts from, and an install with no
-   * mesh would gain three sidebar entries it can never use.
-   */
-  assert.match(VIEW, /const TABS = \[/);
-  for (const tab of ['fleet', 'alerts', 'topology', 'uptime']) {
-    assert.ok(VIEW.includes(`'${tab}'`), `${tab} tab missing`);
-  }
-  assert.equal((INDEX.match(/href="#\/servers"/g) || []).length, 1, 'still exactly one nav entry');
-});
-
-test('⚠️ the SELF-SUSPICION banner renders ABOVE the alerts it explains', () => {
-  /*
-   * When most sites go quiet at once the likely cause is this server's own connection, not forty
-   * simultaneous outages. The reader has to see that BEFORE the forty rows — by row three they are
-   * already phoning a client whose screens are fine.
-   */
-  const banner = VIEW.indexOf("Check this server's connection first");
-  const table = VIEW.indexOf('Open alerts across all servers');
-  assert.ok(banner > -1, 'the banner must exist');
-  assert.ok(banner < table, 'and be rendered before the alert list');
-  assert.match(VIEW, /suspectSelf/);
-});
-
-test('an alert from an unreachable site is marked last known', () => {
-  // Otherwise the inbox is the one screen in the product that still implies live truth.
-  assert.match(VIEW, /a\.stale[\s\S]{0,400}last known/);
-});
-
-test('local incidents share the inbox', () => {
-  // A hub is a node too; its own problems are not somebody else's category.
-  assert.match(VIEW, /On this server/);
-  assert.match(VIEW, /data\.local/);
-});
-
-test('⚠️ version skew is measured against the COMMON version, not the hub\'s', () => {
-  /*
-   * A hub that has not been upgraded yet would otherwise mark its entire healthy fleet as skewed,
-   * which is the fastest way to teach an operator to ignore the column.
-   */
+test('⚠️ version skew is measured against the COMMON version, not this server\'s', () => {
+  // A hub that has not been upgraded yet would otherwise mark its entire healthy fleet as skewed,
+  // which is the fastest way to teach an operator to ignore the column.
   assert.match(VIEW, /modal/);
-  assert.doesNotMatch(VIEW, /ourVersion|hubVersion/,
-    'skew must not be computed against this server\'s own version');
+  assert.doesNotMatch(VIEW, /ourVersion|hubVersion/);
 });
 
 test('an edge with TLS verification off is surfaced, not hidden', () => {
@@ -209,47 +204,168 @@ test('an edge with TLS verification off is surfaced, not hidden', () => {
   assert.match(VIEW, /TLS unverified/);
 });
 
+/* ===================== alerts are centralized, not mesh-only ===================== */
+
+test('⚠️ ALERTS LIVE ON ONE SCREEN, and it is not Servers', () => {
+  /*
+   * A mesh-only inbox is a second place to look for one question — "what is wrong right now" — and
+   * with two, the one the operator does not have open is the one holding the answer.
+   */
+  assert.doesNotMatch(VIEW, /Open alerts across all servers/, 'the mesh-only inbox is gone');
+  assert.doesNotMatch(VIEW, /'alerts', 'Alerts'/, 'and so is its tab');
+  assert.match(ACTIVITY, /Open alerts/, 'Activity carries them now');
+  assert.match(ACTIVITY, /\/mesh\/alerts/, 'including the remote half');
+});
+
+test('⚠️ the SELF-SUSPICION banner renders ABOVE the alerts it explains', () => {
+  /*
+   * When most sites go quiet at once the likely cause is this server's own connection, not forty
+   * simultaneous outages — and the reader has to see that BEFORE the rows, because by row three
+   * they are already phoning a client whose screens are fine.
+   */
+  const banner = ACTIVITY.indexOf("Check this server's connection first");
+  const rows = ACTIVITY.indexOf('${local.map(');
+  assert.ok(banner > -1, 'the banner must exist');
+  assert.ok(rows > -1 && banner < rows, 'and be rendered before the alert rows');
+  assert.match(ACTIVITY, /suspectSelf/);
+});
+
+test('local and remote incidents appear together, and remote ones say where', () => {
+  // To the person on call there is no such thing as "a remote outage": there is an outage.
+  assert.match(ACTIVITY, /mesh\.local/);
+  assert.match(ACTIVITY, /mesh\.alerts/);
+  assert.match(ACTIVITY, /last known, that server is not reachable/,
+    'a stale alert must say so — acting on one is how somebody drives to a screen that is fine');
+});
+
+test('a server with no mesh shows no error about it', () => {
+  // An install that has never heard of the feature must not be told the feature failed.
+  assert.match(ACTIVITY, /catch \(e\) \{ mesh = null; \}/);
+});
+
+/* ===================== the uptime report lives in Reports ===================== */
+
+test('⚠️ THE UPTIME REPORT IS A REPORT', () => {
+  // Filing it under Servers means you have to already know the feature is mesh-shaped to find it.
+  assert.doesNotMatch(VIEW, /uptimePct/, 'it is not in the Servers view any more');
+  assert.match(REPORTS, /renderUptimeReport/);
+  assert.match(REPORTS, /uptimeReportSection/);
+});
+
 test('⚠️ COVERAGE IS RENDERED BESIDE UPTIME, THE SAME SIZE', () => {
   /*
    * "99.9% uptime, 62% coverage" is honest. "99.9%" alone, computed over the 62%, tells a customer
-   * their screens were fine during a week nobody was watching them. Small print under the fold does
-   * not carry that.
+   * their screens were fine during a week nobody was watching them. Whichever number is smaller is
+   * the one cropped out of the screenshot somebody emails.
    */
-  const up = VIEW.match(/Uptime<\/div>\s*<div style="font-size:(\d+)px/);
-  const cov = VIEW.match(/Coverage<\/div>\s*<div style="font-size:(\d+)px/);
+  const up = REPORTS.match(/Uptime<\/div>\s*<div style="font-size:(\d+)px/);
+  const cov = REPORTS.match(/Coverage<\/div>\s*<div style="font-size:(\d+)px/);
   assert.ok(up && cov, 'both figures must be rendered');
   assert.equal(up[1], cov[1], 'and at the same size — coverage is not a footnote');
-  assert.match(VIEW, /coverageNote/);
+  assert.match(REPORTS, /coverageNote/);
 });
 
 test('there is no "all clients" option in the report picker', () => {
   // A report with no client name, mixing customers into one percentage, is the document that gets
   // forwarded to one of those customers.
-  assert.doesNotMatch(VIEW, /All clients|value=""[^>]*>All/);
-  assert.match(VIEW, /clientId=\$\{encodeURIComponent\(state\.clientId\)\}/);
+  assert.match(REPORTS, /clientId=\$\{encodeURIComponent\(uptimeState\.clientId\)\}/);
+  assert.doesNotMatch(REPORTS, /All clients/);
 });
 
 test('⚠️ the CSV is FETCHED with the auth header, not linked', () => {
   /*
-   * The API is Bearer-authenticated from localStorage, so an <a href> to the endpoint would 401 —
-   * and it would 401 by REDIRECTING to login, which reads to the user as "my session expired"
-   * rather than "that link cannot carry a token".
+   * The API is Bearer-authenticated from localStorage, so an <a href> would 401 — and it would 401
+   * by REDIRECTING to login, which reads to the user as "my session expired" rather than "that link
+   * cannot carry a token".
    */
-  assert.match(VIEW, /Authorization: `Bearer \$\{localStorage\.getItem\('token'\)\}`/);
-  assert.match(VIEW, /URL\.createObjectURL/);
-  assert.doesNotMatch(VIEW, /<a href="\/api\/mesh\/uptime\.csv/, 'never a plain link');
+  assert.match(REPORTS, /Authorization: `Bearer \$\{localStorage\.getItem\('token'\)\}`/);
+  assert.match(REPORTS, /URL\.createObjectURL/);
+  assert.doesNotMatch(REPORTS, /<a href="\/api\/mesh\/uptime\.csv/);
 });
 
 test('a truncated incident list says so', () => {
   // A report quietly showing 50 of 300 reads as "that was all of them".
-  assert.match(VIEW, /Showing the 50 longest of/);
-  assert.match(VIEW, /CSV export contains every one/);
+  assert.match(REPORTS, /Showing the 50 longest of/);
+  assert.match(REPORTS, /CSV contains every one/);
 });
 
-test('the one raw fetch stays a GET', () => {
-  // ⚠️ The CSV download bypasses api.js to attach the auth header itself, so it is the one call the
-  // target check above cannot see. It must remain a read.
-  const fetches = [...VIEW.matchAll(/fetch\(([^)]*)\)/g)];
-  assert.ok(fetches.length <= 1, 'exactly one raw fetch, for the export');
-  assert.doesNotMatch(VIEW, /method: '(POST|PUT|PATCH|DELETE)'/);
+test('the uptime section renders NOTHING when there is no mesh', () => {
+  // An ordinary install must not gain an empty panel about a feature it does not have.
+  assert.match(REPORTS, /host\.innerHTML = ''; return;/);
+});
+
+/* ===================== remote orgs ===================== */
+
+test('⚠️ REMOTE ORGS ENTER THE SWITCHER, and selecting one does not mint a JWT', () => {
+  /*
+   * The reversal of an earlier decision, and the reason it is safe: there is no local workspace row
+   * to name in a token. Inventing one would put a workspace id in a JWT that resolves to nothing on
+   * this server, which fails later and somewhere else as a permissions error nobody can explain.
+   */
+  assert.match(SWITCHER, /REMOTE_ORG_KEY/);
+  assert.match(SWITCHER, /String\(wsId\)\.startsWith\('remote:'\)/);
+  assert.match(SWITCHER, /localStorage\.setItem\(REMOTE_ORG_KEY/);
+  assert.doesNotMatch(SWITCHER, /switchWorkspace\(`remote:/, 'never through the workspace JWT path');
+});
+
+test('leaving a remote org clears the mode BEFORE anything else', () => {
+  // Otherwise the local workspace renders under the remote banner and an operator is looking at
+  // their own data labelled as somebody else's.
+  const fn = code(SWITCHER).slice(code(SWITCHER).indexOf('async function switchTo'));
+  const cleared = fn.indexOf('clearRemoteOrg()');
+  const switched = fn.indexOf('api.switchWorkspace');
+  assert.ok(cleared > -1 && switched > -1, 'both paths must exist');
+  assert.ok(cleared < switched, 'the mode is dropped before any workspace switch is attempted');
+});
+
+test('a remote org is visibly marked as remote', () => {
+  // Acting on the wrong customer's screens because two rows looked identical is the failure this
+  // one badge prevents.
+  assert.match(code(SWITCHER), /w\.remote[\s\S]{0,120}badge/);
+});
+
+test('⚠️ a persistent banner names the server being viewed', () => {
+  // Every screen now potentially shows another company's estate; "which server am I on" must never
+  // be a question the UI leaves to memory.
+  assert.match(APP, /renderRemoteOrgBanner/);
+  assert.match(APP, /Viewing <strong>\$\{name\}<\/strong>/);
+  assert.match(APP, /Read-only for now/);
+  assert.match(APP, /Back to this server/);
+});
+
+test('the remote-orgs fetch fails silently on a server with no mesh', () => {
+  assert.match(APP, /catch \(e\) \{ remoteOrgs = \[\]; \}/);
+});
+
+test('⚠️ remote screens render on a SEPARATE path from local ones', () => {
+  /*
+   * The local renderer assumes it can act on every row — drag to a group, assign a playlist, take a
+   * screenshot. Teaching it "except sometimes" is how a control that should be absent ends up
+   * merely disabled, or worse, present and wrong.
+   */
+  assert.match(DASHBOARD, /const remoteOrg = selectedRemoteOrg\(\);[\s\S]{0,80}if \(remoteOrg\) return loadRemoteDashboard\(remoteOrg\)/);
+  assert.match(DASHBOARD, /async function loadRemoteDashboard/);
+});
+
+test('the remote screen list carries an age and offers no actions', () => {
+  const fn = DASHBOARD.slice(DASHBOARD.indexOf('async function loadRemoteDashboard'),
+                             DASHBOARD.indexOf('async function loadDashboard'));
+  assert.ok(fn.length > 100, 'the remote renderer must exist');
+  assert.match(fn, /asOfAgeSec/, 'every remote row shows how old it is');
+  assert.doesNotMatch(fn, /requestScreenshot|draggable|device-select-cb/,
+    'and offers none of the local actions, because none of them can reach that server');
+});
+
+test('⚠️ leaving a remote org does not require a workspace SWITCH', () => {
+  /*
+   * While a remote org is selected, currentId is `remote:…`, so picking your own workspace looks
+   * like a change — but the token already points at it. Asking the server to switch to the
+   * workspace it is already on returns no new token, so the click did nothing and the local
+   * workspace was unselectable for as long as a remote org was active.
+   */
+  assert.match(SWITCHER, /const wasRemote = !!picked;/);
+  assert.match(SWITCHER, /if \(wasRemote && wsId === \(me\?\.current_workspace_id\)\)[\s\S]{0,80}reload/,
+    'dropping the mode IS the whole action in that case');
+  assert.match(SWITCHER, /clearRemoteOrg\(\);[\s\S]{0,200}window\.location\.reload/,
+    'and the mode is cleared BEFORE the reload, so local data never renders under the remote banner');
 });

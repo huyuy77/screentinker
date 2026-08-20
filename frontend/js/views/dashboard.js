@@ -6,6 +6,7 @@ import { t, tn } from '../i18n.js';
 import * as gettingStarted from '../components/getting-started.js';
 import { showDeviceOwnerQRModal } from '../components/device-owner-qr-modal.js';
 import { frameDeviceOutput } from '../lib/device-frame.js';
+import { selectedRemoteOrg } from '../components/workspace-switcher.js';
 
 const DESTRUCTIVE_COMMANDS = ['reboot', 'shutdown'];
 // Command types only — labels resolved through t('dashboard.cmd.<type>')
@@ -602,11 +603,81 @@ async function createWallFromSelection() {
   }
 }
 
+/*
+ * The Displays list for a remote org. Deliberately a SEPARATE path rather than a flag threaded
+ * through the local one: the local renderer assumes it can act on every row — drag to a group,
+ * assign a playlist, take a screenshot — and teaching it "except sometimes" is how a control that
+ * should be absent ends up merely disabled, or worse, present and wrong.
+ */
+async function loadRemoteDashboard(org) {
+  const main = document.getElementById('groupedDevices');
+  if (!main) return;
+  let data;
+  try {
+    data = await api.get(`/mesh/devices?limit=200`);
+  } catch (e) {
+    main.innerHTML = `<div class="empty-state"><h3>Could not reach that server's data</h3><p>${esc(e.message)}</p></div>`;
+    return;
+  }
+  const rows = (data.devices || []).filter((d) => d.originNodeId === org.nodeId);
+
+  const STATUS = { live: ['#22c55e', 'Online'], down: ['#ef4444', 'Offline'],
+                   stale: ['#f59e0b', 'Last known'], unknown: ['#94a3b8', 'Not reported'] };
+  const age = (s) => (s == null ? '' : s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago`
+                   : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`);
+
+  main.innerHTML = `
+    <div class="table-wrap">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:520px">
+        <thead><tr style="border-bottom:1px solid var(--border)">
+          <th style="padding:8px;text-align:left;color:var(--text-muted)">Screen</th>
+          <th style="padding:8px;text-align:left;color:var(--text-muted)">Status</th>
+          <th style="padding:8px;text-align:left;color:var(--text-muted)">As of</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map((d) => {
+            const [dot, label] = STATUS[d.status] || STATUS.unknown;
+            return `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:8px">${d.name ? esc(d.name)
+                // A health-only grant sends no name; saying so beats a blank that reads as a bug.
+                : '<span style="color:var(--text-muted);font-style:italic">not shared</span>'}</td>
+              <td style="padding:8px">
+                <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot};margin-right:6px"></span>${label}</td>
+              <!-- ⚠️ Every remote row carries its age. A green dot from ninety minutes ago is a lie
+                   by omission, and this list is the one people scan fastest. -->
+              <td style="padding:8px;color:var(--text-muted);font-size:12px">${esc(age(d.asOfAgeSec))}</td>
+            </tr>`;
+          }).join('') || `<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text-muted)">No screens shared from this server.</td></tr>`}
+        </tbody>
+      </table>
+    </div>`;
+
+  const stat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  stat('statTotal', rows.length);
+  stat('statOnline', rows.filter((d) => d.status === 'live').length);
+  stat('statOffline', rows.filter((d) => d.status === 'down').length);
+}
+
 async function loadDashboard() {
   const main = document.getElementById('groupedDevices');
   if (!main) return;
 
   try {
+    /*
+     * ⚠️ WHEN A REMOTE ORG IS SELECTED, THESE ARE SOMEBODY ELSE'S SCREENS. They render in the
+     * ordinary Displays list on purpose — to an operator a screen is a screen wherever it happens
+     * to be plugged in, and making them go to a different section to look at one customer instead
+     * of another is the thing that feels broken.
+     *
+     * ⚠️ THEY ARE NOT LOCAL ROWS AND MUST NOT PRETEND TO BE. A mirrored device carries only what
+     * its grant allows: no screenshot, no playlist assignment, no group. Every one of those is
+     * absent rather than empty, so nothing here can silently act on a device this server does not
+     * own — and until the downward write channel exists, that absence IS the enforcement.
+     */
+    const remoteOrg = selectedRemoteOrg();
+    if (remoteOrg) return loadRemoteDashboard(remoteOrg);
+
     const [rawDevices, groups, playlists, walls] = await Promise.all([
       api.getDevices(), api.getGroups(), api.getPlaylists(), api.getWalls(),
     ]);

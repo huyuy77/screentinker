@@ -26,7 +26,51 @@ import * as noWorkspace from './views/no-workspace.js';
 import { applyBranding } from './branding.js';
 import { t } from './i18n.js';
 import { isPlatformAdmin } from './utils.js';
-import { renderWorkspaceSwitcher } from './components/workspace-switcher.js';
+import { renderWorkspaceSwitcher, selectedRemoteOrg, clearRemoteOrg } from './components/workspace-switcher.js';
+
+/*
+ * ⚠️ A PERSISTENT BANNER WHILE VIEWING SOMEBODY ELSE'S SERVER, and it is not decoration.
+ *
+ * Every screen in the app now potentially shows another company's estate, and the single most
+ * expensive mistake available here is acting on the wrong customer's screens because the page
+ * looked like home. The banner names the org, says the data is read-only for now, and offers one
+ * click back — so "which server am I on" is never a question the UI leaves to memory.
+ */
+function renderRemoteOrgBanner() {
+  /*
+   * ⚠️ MOUNTED IN #banners, INSIDE the content column — not prepended to <body>.
+   *
+   * The first version used document.body.prepend with position:sticky, which put a full-width block
+   * above the app shell: it sat beside the sidebar rather than above the page, painted a slab of
+   * amber down the left column and shoved the layout apart. The app already has a slot for exactly
+   * this, above the view and inside the content area, and using it means the notice moves with the
+   * page instead of fighting the chrome.
+   *
+   * ⚠️ Restrained on purpose. The workspace switcher already reads "Acme Retail · remote" a few
+   * pixels away, so this is a reminder, not an alarm — a solid warning-coloured bar for a normal,
+   * chosen state is the kind of thing people stop seeing within a day.
+   */
+  const host = document.getElementById('banners');
+  if (!host) return;
+  const existing = document.getElementById('remoteOrgBanner');
+  const org = selectedRemoteOrg();
+  if (!org) { if (existing) existing.remove(); return; }
+
+  const el = existing || document.createElement('div');
+  el.id = 'remoteOrgBanner';
+  el.style.cssText = 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;' +
+    'border-left:3px solid var(--warning,#f59e0b);background:var(--bg-card);' +
+    'padding:8px 12px;margin:0 0 12px;font-size:12px;border-radius:0 4px 4px 0';
+  const name = String(org.name || '').replace(/[&<>"]/g, '');
+  el.innerHTML = `
+    <span>Viewing <strong>${name}</strong> on another server${
+      org.stale ? ' — not currently reachable, showing last known state' : ''}.</span>
+    <span style="color:var(--text-muted)">Read-only for now.</span>
+    <button id="leaveRemoteOrg" class="btn btn-secondary btn-sm" style="margin-left:auto">
+      Back to this server</button>`;
+  if (!existing) host.appendChild(el);
+  el.querySelector('#leaveRemoteOrg').onclick = () => { clearRemoteOrg(); window.location.reload(); };
+}
 import { showToast } from './components/toast.js';
 import { api } from './api.js';
 import { esc } from './utils.js';
@@ -242,7 +286,16 @@ async function refreshCurrentUser() {
     localStorage.setItem('user', JSON.stringify(fresh));
     // Re-render the workspace switcher on every /me refresh - cheap, and keeps
     // the dropdown in sync if a workspace was added/removed in another tab.
-    renderWorkspaceSwitcher(fresh);
+    //
+    // ⚠️ Remote orgs are fetched separately and FAIL SILENTLY. A server with no mesh has no such
+    // endpoint, and an install that has never heard of the feature must not see an error about it.
+    let remoteOrgs = [];
+    try {
+      const r = await fetch('/api/mesh/orgs', { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) remoteOrgs = (await r.json()).orgs || [];
+    } catch (e) { remoteOrgs = []; }
+    renderWorkspaceSwitcher(fresh, remoteOrgs);
+    renderRemoteOrgBanner();
     window.dispatchEvent(new CustomEvent('user-refreshed', { detail: fresh }));
     // #12: /me is the first place accessible_workspaces is known. If it resolves
     // to zero (org-less user), send them to the empty state now - on a fresh

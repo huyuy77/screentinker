@@ -157,6 +157,7 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
         code,
         expiresAt: expires,
         nodeId: thisNode(),
+        nodeName: store.nodeName(db),
         grant: g.categories,
         capabilities: caps.capabilities,
         // ⚠️ Spelled out in the response so the operator reads what they are about to hand over
@@ -176,6 +177,10 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
       const peer = {
         nodeId: body.nodeId,
         version: body.version,
+        // ⚠️ A NAME, capped and sanitised. It is attacker-influenced text from another machine that
+        // will be rendered in this server's UI and used to label a relationship, so it is treated
+        // like any other remote string: bounded, and never trusted to be unique.
+        name: String(body.nodeName || '').trim().slice(0, 60) || null,
         ancestry: Array.isArray(body.ancestry) ? body.ancestry : [],
       };
 
@@ -225,13 +230,13 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
         db.prepare(`INSERT INTO mesh_edges
             (id, peer_node_id, direction, role_capabilities, grant_categories, transport_direction,
              retention_days, tls_verify, peer_version, token_hash, token_expires_at, client_id,
-             created_at, peer_url)
-            VALUES (?,?,'down',?,?,'they-dial',?,1,?,?,?,?,?,?)`).run(
+             created_at, peer_url, peer_name)
+            VALUES (?,?,'down',?,?,'they-dial',?,1,?,?,?,?,?,?,?)`).run(
           edgeId, peer.nodeId,
           JSON.stringify(check.capabilities), JSON.stringify(check.grant),
           codeRecord.retention_days || null, String(peer.version || ''),
           tokenHash, nowSec() + 365 * 86400, codeRecord.client_id || null,
-          nowSec(), peerUrl.ok ? peerUrl.url : null);
+          nowSec(), peerUrl.ok ? peerUrl.url : null, peer.name);
       });
 
       try {
@@ -251,6 +256,8 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
       res.json({
         ok: true,
         edgeId,
+        // So the child can show WHO it is now reporting to, by name.
+        parentName: store.nodeName(db),
         // The one and only time the plaintext token leaves this node.
         edgeToken: token,
         parentNodeId: thisNode(),
@@ -270,6 +277,32 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
    * contract dispute waiting to happen, and hiding it behind the flag that CREATES it would mean the
    * one configuration where it is invisible is the one where somebody turned the flag off to hide it.
    */
+  /*
+   * What this server can do in the mesh, so the UI can offer only what will work.
+   *
+   * ⚠️ ASKED, NOT ASSUMED. There is no client-side copy of the flags and there must not be: they
+   * live in the environment, and a bundled duplicate drifts the moment somebody changes one — then
+   * the UI offers an action that 404s, which is worse than not offering it.
+   */
+  router.get('/capabilities', requireAuth, (req, res) => {
+    const rows = db.prepare("SELECT * FROM mesh_edges WHERE direction = 'up'").all();
+    res.json({
+      nodeId: thisNode(),
+      nodeName: store.nodeName(db),
+      canMint: !!config.meshAcceptEnrollment,
+      canEnroll: !!config.meshAllowUplink,
+      uplinks: rows.map((e) => ({
+        edgeId: e.id,
+        parentNodeId: e.peer_node_id,
+        parentName: e.peer_name || null,
+        parentUrl: e.peer_url,
+        sharing: store.safeParseArray(e.grant_categories),
+        lastSyncAt: e.last_sync_at ? e.last_sync_at * 1000 : null,
+        revoked: !!e.revoked_at,
+      })),
+    });
+  });
+
   router.get('/uplink', requireAuth, (req, res) => {
     const rows = db.prepare("SELECT * FROM mesh_edges WHERE direction = 'up'").all();
     res.json({
@@ -301,6 +334,7 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
       try {
         const r = await postJson(`${parsed.url}/api/mesh/pair/redeem`, {
           code, nodeId: me, version,
+          nodeName: store.nodeName(db),
           ancestry: thisAncestry(),
           // So the parent can deep-link back to objects here. Optional: a node behind NAT simply
           // has no useful address to give, and the hub renders a dash rather than a broken link.
@@ -321,9 +355,10 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
 
       db.prepare(`INSERT INTO mesh_edges
           (id, peer_node_id, direction, role_capabilities, grant_categories, transport_direction,
-           tls_verify, peer_version, up_token, client_id, created_at, peer_url)
-          VALUES (?,?,'up',?,?,'we-dial',?,?,?,NULL,?,?)
+           tls_verify, peer_version, up_token, client_id, created_at, peer_url, peer_name)
+          VALUES (?,?,'up',?,?,'we-dial',?,?,?,NULL,?,?,?)
           ON CONFLICT(peer_node_id, direction) DO UPDATE SET
+            peer_name        = excluded.peer_name,
             grant_categories = excluded.grant_categories,
             up_token         = excluded.up_token,
             peer_url         = excluded.peer_url,
@@ -331,7 +366,7 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
             revoked_at       = NULL`).run(
         uid(), answer.parentNodeId,
         JSON.stringify(answer.capabilities || []), JSON.stringify(answer.grant || []),
-        tlsVerify ? 1 : 0, null, answer.edgeToken, nowSec(), parsed.url);
+        tlsVerify ? 1 : 0, null, answer.edgeToken, nowSec(), parsed.url, answer.parentName || null);
 
       if (typeof onUplinkChanged === 'function') onUplinkChanged();
       res.json({

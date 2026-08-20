@@ -8,7 +8,39 @@
  * "invisible by default" guarantee (I1), and it is easy to break by assuming a table.
  */
 
+const os = require('os');
 const { newNodeId } = require('./node-identity');
+
+/**
+ * This server's own friendly name, as declared to peers when pairing.
+ *
+ * ⚠️ Defaults to the host name rather than to the node id. An operator pairing two servers is
+ * looking at a screen that has to distinguish them, and "screentinker-hq" does that while
+ * "bd5f5179-49dd-…" does not — the id is what the machines use, and it is not what anybody calls
+ * the box. Stored once so a later hostname change cannot silently rename an existing relationship.
+ */
+function nodeName(db) {
+  try {
+    const row = db.prepare('SELECT node_name FROM mesh_node WHERE singleton = 1').get();
+    if (row && row.node_name) return row.node_name;
+    const fallback = (os.hostname() || 'ScreenTinker').split('.')[0];
+    db.prepare('UPDATE mesh_node SET node_name = ? WHERE singleton = 1').run(fallback);
+    return fallback;
+  } catch (e) {
+    return null;
+  }
+}
+
+function setNodeName(db, name) {
+  const clean = String(name || '').trim().slice(0, 60);
+  if (!clean) return false;
+  try {
+    db.prepare('UPDATE mesh_node SET node_name = ? WHERE singleton = 1').run(clean);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 /**
  * This node's own id, created on first call and stable forever after.
@@ -86,7 +118,8 @@ function reloadEdge(db, edgeId) {
     const row = db.prepare(`
       SELECT id, peer_node_id, direction, role_capabilities, grant_categories,
              transport_direction, retention_days, tombstone_purge_days, tls_verify,
-             peer_version, client_id, created_at, last_sync_at, revoked_at, token_expires_at
+             peer_version, client_id, created_at, last_sync_at, revoked_at, token_expires_at,
+             peer_name
         FROM mesh_edges WHERE id = ?
     `).get(edgeId);
     if (!row) return null;
@@ -135,5 +168,6 @@ function listChildEdges(db) {
 }
 
 module.exports = {
-  ensureNodeIdentity, findEdgeByTokenHash, reloadEdge, touchEdge, listChildEdges, safeParseArray,
+  ensureNodeIdentity, nodeName, setNodeName,
+  findEdgeByTokenHash, reloadEdge, touchEdge, listChildEdges, safeParseArray,
 };
