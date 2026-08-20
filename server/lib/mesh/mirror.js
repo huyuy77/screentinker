@@ -52,6 +52,7 @@ const FIELD_CATEGORY = Object.freeze({
    * grouping reveals how a client organises their estate, and that is theirs to withhold.
    */
   workspace_id: 'identity',
+
   hardware_model: 'identity',
   hardware_serial: 'identity',
   app_version: 'identity',
@@ -74,6 +75,13 @@ const FIELD_CATEGORY = Object.freeze({
   // content
   playlist_name: 'content-metadata',
   playlist_id: 'content-metadata',
+  /*
+   * ⚠️ WHICH LAYOUT, alongside which playlist. Without it the device page renders a playlist's
+   * ITEMS while its selector reads "No playlist" — the contents shared, the pointer to them not.
+   * playlist_id was already here; layout_id was the one missing, and I briefly added BOTH, which
+   * would have been a duplicate key silently shadowing the original.
+   */
+  layout_id: 'content-metadata',
   schedule_summary: 'content-metadata',
 
   // diagnostics

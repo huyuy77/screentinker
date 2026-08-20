@@ -74,7 +74,7 @@ function deviceProjections(db, grantCategories, edge) {
   const scope = edge ? scopeClause(edge, 'd.workspace_id') : { sql: '', params: [] };
   const rows = db.prepare(`
     SELECT d.id, d.name, d.status, d.last_heartbeat, d.app_version, d.platform, d.client_type,
-           d.workspace_id,
+           d.workspace_id, d.playlist_id, d.layout_id,
            t.battery_level, t.battery_charging, t.storage_free_mb, t.storage_total_mb,
            t.ram_free_mb, t.ram_total_mb, t.cpu_usage, t.wifi_rssi, t.uptime_seconds
       FROM devices d
@@ -114,6 +114,84 @@ function workspaceProjections(db, grantCategories, edge) {
     // An older schema, or a build without workspaces: the parent simply groups by server instead.
     return [];
   }
+}
+
+/**
+ * One screen, in the shape the device page actually expects.
+ *
+ * ⚠️ THE SUMMARY SHAPE WAS NOT ENOUGH, and the symptom was silent. The local /api/devices/:id
+ * returns a composite — telemetry[], assignments[], playlist_status, statusLog, screenshot — and
+ * returning only the flat summary made the Playlist tab read "No content assigned" and Device Info
+ * render blank. Both are legitimate states for a real screen, so nothing looked broken; the page
+ * simply lied quietly. A proxy that returns a DIFFERENT shape from the endpoint it stands in for is
+ * not a proxy.
+ *
+ * ⚠️ EACH PIECE IS GATED ON THE GRANT THAT COVERS IT, so the composite cannot become the way around
+ * the grant that the individual fields respect. And the local response's `owner_email`,
+ * `owner_name` and `_workspaceRole` are deliberately NOT carried: those name the client's own
+ * staff, which is nobody else's business and is not something any grant here asks for.
+ */
+function deviceDetail(db, grants, deviceId, summary) {
+  const has = (g) => grants.includes(g);
+  const out = { ...summary };
+  const safe = (fn, fallback) => { try { return fn(); } catch (e) { return fallback; } };
+
+  out.telemetry = has('health') ? safe(() => db.prepare(
+    `SELECT battery_level, battery_charging, storage_free_mb, storage_total_mb, ram_free_mb,
+            ram_total_mb, cpu_usage, wifi_rssi, uptime_seconds, local_ip, local_ip6,
+            attached_display, video_mode, temperature_c, reported_at
+       FROM device_telemetry WHERE device_id = ? ORDER BY reported_at DESC LIMIT 20`)
+    .all(deviceId), []) : [];
+
+  /*
+   * ⚠️ The screenshot needs `display-capture`, which is its own grant for a reason: an image of a
+   * screen may contain whatever was behind it. Without the grant there is no path, not an empty
+   * one — the page then renders its ordinary "no screenshot" state rather than a broken image.
+   */
+  out.screenshot = has('display-capture') ? safe(() => db.prepare(
+    'SELECT * FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1')
+    .get(deviceId) || null, null) : null;
+
+  const row = safe(() => db.prepare('SELECT playlist_id, layout_id FROM devices WHERE id = ?')
+    .get(deviceId), null);
+
+  out.assignments = [];
+  out.playlist_status = null;
+  out.playlist_has_published = false;
+  out.active_layout_zones = [];
+  if (has('content-metadata') && row && row.playlist_id) {
+    out.assignments = safe(() => db.prepare(`
+      SELECT pi.id, pi.content_id, pi.widget_id, pi.zone_id, pi.sort_order, pi.duration_sec,
+             pi.muted, pi.created_at, pi.updated_at,
+             COALESCE(c.filename, w.name) AS filename, c.mime_type, c.duration_sec AS content_duration,
+             w.name AS widget_name, w.widget_type
+        FROM playlist_items pi
+        LEFT JOIN content c ON pi.content_id = c.id
+        LEFT JOIN widgets w ON pi.widget_id = w.id
+       WHERE pi.playlist_id = ? ORDER BY pi.sort_order ASC`).all(row.playlist_id), []);
+    const pl = safe(() => db.prepare(
+      'SELECT status, published_snapshot FROM playlists WHERE id = ?').get(row.playlist_id), null);
+    if (pl) {
+      out.playlist_status = pl.status;
+      out.playlist_has_published = pl.published_snapshot !== null;
+    }
+    /*
+     * ⚠️ `filepath` and `thumbnail_path` are omitted on purpose. They are paths on the CHILD's
+     * disk; a parent can neither fetch them nor do anything useful with them, and shipping them
+     * would leak the client's storage layout for no benefit at all.
+     */
+  }
+
+  // Diagnostics: why something went wrong is its own grant, separate from whether it is alive.
+  out.statusLog = has('diagnostics') ? safe(() => db.prepare(
+    `SELECT status, reason, detail, timestamp FROM device_status_log
+      WHERE device_id = ? AND timestamp > ? ORDER BY timestamp ASC`)
+    .all(deviceId, Math.floor(Date.now() / 1000) - 86400), []) : [];
+  out.deviceEvents = has('diagnostics') ? safe(() => db.prepare(
+    `SELECT * FROM device_events WHERE device_id = ? ORDER BY created_at DESC LIMIT 50`)
+    .all(deviceId), []) : [];
+
+  return out;
 }
 
 function nodeHealth(db, nodeId) {
@@ -179,14 +257,27 @@ function answerRead(db, edge, req) {
   const seg = path.split('/');
   const inScope = (wsId) => !shared || !shared.length || wsId == null || shared.includes(wsId);
 
+  /*
+   * ⚠️ COMPUTED ONCE PER REQUEST. Every branch below needs the visible device set — the collection
+   * to return it, the single-object reads to check the id is one this edge may see at all — and
+   * each call was re-running a devices×telemetry join over the whole fleet. Three passes to answer
+   * one question about one screen.
+   *
+   * ⚠️ AND THIS RUNS ON THE MAIN THREAD. better-sqlite3 is synchronous by design, and there is no
+   * worker behind the mesh: a read from a parent is served on the same event loop that answers
+   * every player's heartbeat. On a 400-screen node that is the difference between a proxy that is
+   * free and one an operator feels on their own screens — which is exactly the harm I1 exists to
+   * prevent, arriving from the opposite direction to the one it was written for.
+   */
+  const visible = deviceProjections(db, grants, edge);
+
   if (path === '/api/devices') {
     /*
      * ⚠️ Built from the same projection the mirror uses, so a field cannot travel over the proxy
      * that would not travel over the mirror. Two paths to the same data with two different filters
      * is how one of them ends up more generous than anybody intended.
      */
-    return { ok: true, rows: readProxy.scopeRows(deviceProjections(db, grants, edge), shared),
-             asOf: nowSec() };
+    return { ok: true, rows: readProxy.scopeRows(visible, shared), asOf: nowSec() };
   }
 
   if (seg.length === 4 && seg[2] === 'devices') {
@@ -196,13 +287,13 @@ function answerRead(db, edge, req) {
      * and a parent guessing device ids from another workspace is exactly the shape of attack a
      * per-collection filter misses.
      */
-    const one = deviceProjections(db, grants, edge).find((d) => d.id === seg[3]);
+    const one = visible.find((d) => d.id === seg[3]);
     if (!one) return { ok: false, reason: 'No such screen on this server.' };
-    return { ok: true, row: one, asOf: nowSec() };
+    return { ok: true, row: deviceDetail(db, grants, seg[3], one), asOf: nowSec() };
   }
 
   if (seg.length === 5 && seg[2] === 'devices' && seg[4] === 'telemetry') {
-    const owns = deviceProjections(db, grants, edge).some((d) => d.id === seg[3]);
+    const owns = visible.some((d) => d.id === seg[3]);
     if (!owns) return { ok: false, reason: 'No such screen on this server.' };
     try {
       const rows = db.prepare(
@@ -215,7 +306,7 @@ function answerRead(db, edge, req) {
   }
 
   if (seg.length === 5 && seg[2] === 'assignments' && seg[3] === 'device') {
-    const owns = deviceProjections(db, grants, edge).some((d) => d.id === seg[4]);
+    const owns = visible.some((d) => d.id === seg[4]);
     if (!owns) return { ok: false, reason: 'No such screen on this server.' };
     try {
       const rows = db.prepare(
@@ -390,5 +481,5 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
 
 module.exports = {
   startMeshUplinks, REPORT_INTERVAL_MS,
-  deviceProjections, workspaceProjections, nodeHealth, openAlerts, answerRead,
+  deviceProjections, workspaceProjections, nodeHealth, openAlerts, answerRead, deviceDetail,
 };
