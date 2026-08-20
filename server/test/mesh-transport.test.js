@@ -451,3 +451,26 @@ test('⚠️ the RE-BUFFER path is bounded too', () => {
   assert.equal(up.buffer.length, 3, 'never grows past the limit however many come back');
   assert.equal(up.dropped, 100, 'and the loss is counted rather than hidden');
 });
+
+test('⚠️ A TOKEN EXPIRING IN A YEAR IS NOT TREATED AS EXPIRED (seconds vs milliseconds)', async () => {
+  /*
+   * The stored column is unix SECONDS, like every timestamp in this database. meshSocket's now() is
+   * MILLISECONDS, because the backpressure window is a ms budget. Comparing the two made every token
+   * look long expired — the handshake refused every child with "this connection's token expired" and
+   * the mesh never connected at all.
+   *
+   * ⚠️ Every unit test still passed, because the fixtures set token_expires_at to null and never
+   * exercised the comparison. Only standing two real servers up found it.
+   */
+  const hub = await parent({ edgeOver: { token_expires_at: Math.floor(Date.now() / 1000) + 365 * 86400 } });
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected, 4000);
+    up.send(envelope.createEnvelope({
+      originNodeId: CHILD_ID, type: 'node-health', bodyVersion: 1,
+      ancestry: [CHILD_ID], originTs: Date.now(), body: { ok: true },
+    }));
+    await waitFor(() => hub.received.length === 1);
+    assert.equal(up.lastError, null, 'no refusal at all');
+  } finally { up.stop(); await hub.close(); }
+});

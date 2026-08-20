@@ -51,6 +51,20 @@ function ago(sec) {
 }
 
 const hhmm = (sec) => (sec == null ? '' : new Date(sec * 1000).toLocaleString());
+
+/*
+ * ⚠️ A node id is a UUID, and a full one in every row of a table is unreadable — it pushes the
+ * columns an operator actually reads off the screen and gives them nothing, because no human
+ * distinguishes two UUIDs by eye anyway. Shortened for display with the full value on hover and in
+ * the title, so it stays copyable and unambiguous when somebody genuinely needs it.
+ *
+ * Not truncated with CSS: a mid-word ellipsis would hide WHICH end was kept, and the leading
+ * characters are the half people compare.
+ */
+const shortId = (id) => (id ? String(id).slice(0, 8) : '');
+const idBadge = (id) => (id
+  ? `<span class="badge" title="${esc(id)}" style="font-family:monospace">${esc(shortId(id))}</span>`
+  : '<span class="muted">—</span>');
 const mins = (sec) => (sec >= 3600 ? `${Math.round(sec / 360) / 10}h` : `${Math.round(sec / 60)}m`);
 
 function statusCell(d) {
@@ -71,7 +85,8 @@ function nodeCard(n) {
     : `${n.devicesOnline}`;
   return `
     <div class="info-card">
-      <div class="info-card-label">${esc(n.nodeId || '')}</div>
+      <div class="info-card-label" title="${esc(n.nodeId || '')}"
+           style="font-family:monospace">${esc(shortId(n.nodeId))}</div>
       <div class="info-card-value">${online} / ${n.devicesTotal}</div>
       <div style="font-size:11px;color:var(--text-muted)">
         ${n.version ? esc(n.version) : ''}
@@ -89,7 +104,7 @@ function deviceRow(d) {
         `<span style="color:var(--text-muted);font-style:italic">not shared</span>`}</td>
       <!-- ⚠️ The origin node is its OWN column, never concatenated into the name. Folding it in
            ("Lobby (Acme)") breaks sort and search for every row at once. -->
-      <td><span class="badge">${esc(d.originNodeId || '')}</span></td>
+      <td>${idBadge(d.originNodeId)}</td>
       <td>${statusCell(d)}</td>
       <td>${d.deepLink
         ? `<a href="${esc(d.deepLink)}" target="_blank" rel="noopener">Open on its server &rarr;</a>`
@@ -282,7 +297,7 @@ async function renderAlerts(panel) {
             <tr>
               <td>${esc(String(a.alert_type || '').replace(/[_-]/g, ' '))}
                   <span class="badge">${esc(a.severity || '')}</span></td>
-              <td><span class="badge">${esc(a.origin_node_id)}</span>
+              <td>${idBadge(a.origin_node_id)}
                   ${a.stale
                     // ⚠️ An alert from a site we cannot currently reach is LAST KNOWN like every
                     // other row here. Without this the inbox is the one screen that still implies
@@ -366,7 +381,7 @@ async function renderTopology(panel) {
             const skew = e.peerVersion && modal && e.peerVersion !== modal;
             return `
             <tr>
-              <td><span class="badge">${esc(e.peerNodeId || '')}</span></td>
+              <td>${idBadge(e.peerNodeId)}</td>
               <td>${e.clientId ? esc(e.clientId) :
                 // Unassigned edges are visible to platform admins only; saying so beats a blank.
                 '<span class="muted" style="font-style:italic">unassigned</span>'}</td>
@@ -397,7 +412,7 @@ async function renderConnect(panel) {
     <div class="card">
       <h3 style="margin-top:0">This server</h3>
       <p class="muted" style="font-size:12px">Its id in the mesh is
-        <span class="badge">${esc(up.nodeId || 'not assigned yet')}</span>.
+        ${up.nodeId ? idBadge(up.nodeId) : '<span class="badge">not assigned yet</span>'}.
         This id is generated here and registered nowhere — there is no central directory.</p>
     </div>
 
@@ -600,7 +615,7 @@ async function loadUptime(panel) {
         ${r.incidents.slice(0, 50).map((i) => `
           <tr>
             <td>${esc(i.deviceName || i.deviceId)}</td>
-            <td><span class="badge">${esc(i.originNodeId)}</span></td>
+            <td>${idBadge(i.originNodeId)}</td>
             <td>${esc(String(i.alertType || '').replace(/[_-]/g, ' '))}</td>
             <td>${esc(hhmm(i.openedAt))}</td>
             <td>${i.ongoing ? '<strong>still down</strong>' : esc(mins(i.downSeconds))}</td>
@@ -620,7 +635,7 @@ async function loadUptime(panel) {
       <table class="data-table">
         <thead><tr><th>Server</th><th>What</th><th>Started</th><th>For</th></tr></thead>
         <tbody>${r.unattributedIncidents.map((u) => `
-          <tr><td><span class="badge">${esc(u.originNodeId)}</span></td>
+          <tr><td>${idBadge(u.originNodeId)}</td>
               <td>${esc(String(u.alertType || '').replace(/[_-]/g, ' '))}</td>
               <td>${esc(hhmm(u.openedAt))}</td>
               <td>${esc(mins(u.downSeconds))}</td></tr>`).join('')}

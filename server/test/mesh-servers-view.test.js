@@ -81,8 +81,17 @@ test('⚠️ the origin node is its own column, not folded into the name', () =>
   // "Lobby (Acme)" breaks sort and search for every row at once, and is hard to undo once customers
   // have learned to read it that way.
   assert.match(VIEW, /<th>Server<\/th>/, 'the server gets its own column header');
-  assert.match(VIEW, /badge">\$\{esc\(d\.originNodeId/, 'and its own badge cell');
+  assert.match(VIEW, /<td>\$\{idBadge\(d\.originNodeId\)\}<\/td>/, 'and its own badge cell');
   assert.doesNotMatch(VIEW, /\$\{d\.name\}\s*\(\$\{d\.originNodeId/, 'never concatenated');
+
+  /*
+   * ⚠️ Shortened for display, with the FULL id still present. A node id is a UUID and a full one in
+   * every row pushes the columns an operator actually reads off the screen, for something no human
+   * distinguishes by eye. It has to stay recoverable though — hence the title attribute — because
+   * when somebody does need the id, they need all of it.
+   */
+  assert.match(VIEW, /const shortId = \(id\) => \(id \? String\(id\)\.slice\(0, 8\)/);
+  assert.match(VIEW, /title="\$\{esc\(id\)\}"/, 'the full id must survive on hover');
 });
 
 test('a device with no shared name says so rather than rendering blank', () => {

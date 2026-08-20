@@ -39,16 +39,27 @@ function activeUpEdges(db) {
 
 /** Devices as this node knows them, already narrowed to the grant. */
 function deviceProjections(db, grantCategories) {
+  /*
+   * ⚠️ Only columns that exist. The first version of this query named `hardware_model` and joined
+   * device_telemetry on `created_at`; neither exists — telemetry is timestamped `reported_at`, and
+   * the hardware fields in mirror.js's category map come from families that report them, not from a
+   * `devices` column. SQLite errors on an unknown column, so the whole report failed and the hub
+   * showed a connected node with zero screens — which looks exactly like a working link with an
+   * empty fleet.
+   *
+   * projectDevice() skips anything undefined, so a field this node cannot answer is simply absent
+   * rather than sent as null — the grant decides what MAY travel, the row decides what exists.
+   */
   const rows = db.prepare(`
-    SELECT d.id, d.name, d.status, d.last_heartbeat, d.hardware_model, d.app_version, d.platform,
+    SELECT d.id, d.name, d.status, d.last_heartbeat, d.app_version, d.platform, d.client_type,
            t.battery_level, t.battery_charging, t.storage_free_mb, t.storage_total_mb,
            t.ram_free_mb, t.ram_total_mb, t.cpu_usage, t.wifi_rssi, t.uptime_seconds
       FROM devices d
       LEFT JOIN (
-        SELECT device_id, MAX(created_at) AS created_at FROM device_telemetry GROUP BY device_id
+        SELECT device_id, MAX(reported_at) AS reported_at FROM device_telemetry GROUP BY device_id
       ) latest ON latest.device_id = d.id
       LEFT JOIN device_telemetry t
-             ON t.device_id = latest.device_id AND t.created_at = latest.created_at
+             ON t.device_id = latest.device_id AND t.reported_at = latest.reported_at
   `).all();
   return rows.map((r) => mirror.projectDevice(r, grantCategories));
 }
@@ -141,6 +152,31 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
           tlsVerify: edge.tls_verify !== 0,
           logger,
         }).start();
+        /*
+         * ⚠️ REPORT AS SOON AS THE SOCKET COMES UP, not at the next tick. Otherwise a node that was
+         * just enrolled shows nothing on the hub for up to a minute — the operator's very first
+         * look at the thing they just connected is an empty page, which reads as "it did not work"
+         * and gets retried. Also covers every reconnect, so a link that drops catches up at once
+         * instead of waiting out the interval.
+         */
+        /*
+         * ⚠️ A failing uplink SAYS SO in the log. The Uplink keeps lastError for the connection view,
+         * but nothing printed it — so a link that could not connect looked identical to one that was
+         * connected and idle, and the only symptom was a hub showing a node with no data. Rate is
+         * not a concern: the backoff is jittered and caps at a minute.
+         */
+        link.on('retry-scheduled', ({ attempt, delayMs, reason }) => {
+          logger.warn(`[mesh] uplink to ${edge.peer_node_id} failed (attempt ${attempt}): ` +
+                      `${reason || 'unknown'} — retrying in ${Math.round(delayMs / 1000)}s`);
+        });
+        link.on('connected', () => {
+          try {
+            const fresh = db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id);
+            if (fresh && !fresh.revoked_at) send(fresh, link);
+          } catch (e) {
+            logger.warn(`[mesh] first report to ${edge.peer_node_id} failed: ${e && e.message}`);
+          }
+        });
         links.set(edge.id, link);
         logger.log(`[mesh] reporting upward to ${edge.peer_node_id} at ${edge.peer_url}`);
       } catch (e) {

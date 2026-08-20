@@ -36,6 +36,14 @@ function setupMeshSocket(io, deps) {
   if (!deps || !deps.acceptEnrollment || !deps.acceptEnrollment()) return null;
 
   const now = deps.now || (() => Date.now());
+  /*
+   * ⚠️ SECONDS, and it needs its own accessor. now() is MILLISECONDS — the backpressure window is a
+   * ms budget — while every timestamp column in this database is unix seconds. Comparing
+   * token_expires_at (≈1.8e9) against Date.now() (≈1.8e12) makes every token look long expired, so
+   * the handshake refused every child with "this connection's token expired" and the mesh simply
+   * never connected. Two units in one function is how that happens, so they are two names now.
+   */
+  const nowSeconds = () => Math.floor(now() / 1000);
   const log = deps.logger || console;
   const backpressure = new Backpressure();
   const meshNs = io.of('/mesh');
@@ -66,8 +74,9 @@ function setupMeshSocket(io, deps) {
       return next(new Error('This connection is no longer authorised. It may have been revoked, or ' +
                             'its token may have expired — reconnect it from either end.'));
     }
-    if (!pairing.edgeIsActive(edge, now())) {
-      return next(new Error(pairing.edgeInactiveReason(edge, now()) || 'This connection is not active.'));
+    if (!pairing.edgeIsActive(edge, nowSeconds())) {
+      return next(new Error(
+        pairing.edgeInactiveReason(edge, nowSeconds()) || 'This connection is not active.'));
     }
 
     socket.data.edge = edge;
@@ -102,8 +111,8 @@ function setupMeshSocket(io, deps) {
          */
         if (deps.reloadEdge) {
           const current = deps.reloadEdge(edge.id);
-          if (!current || !pairing.edgeIsActive(current, now())) {
-            const reason = pairing.edgeInactiveReason(current, now())
+          if (!current || !pairing.edgeIsActive(current, nowSeconds())) {
+            const reason = pairing.edgeInactiveReason(current, nowSeconds())
               || 'This connection is no longer authorised.';
             if (typeof ack === 'function') ack({ ok: false, reason });
             // Disconnected, not merely refused: leaving the socket open invites the child to keep
