@@ -270,6 +270,52 @@ function answerRead(db, edge, req) {
     return { ok: true, row: deviceDetail(db, grants, seg[3], one), asOf: nowSec() };
   }
 
+  if (seg.length === 5 && seg[2] === 'devices' && seg[4] === 'screenshot') {
+    /*
+     * ⚠️ THE BYTES, NOT THE ROW. The composite device read already returns a `screenshot` record
+     * when the grant allows — but that record names a file on THIS machine's disk, which a parent
+     * can neither open nor do anything with. Returning it and calling the job done is how a remote
+     * device page ends up with an empty picture frame and no error: the field was present, the
+     * image was not.
+     */
+    const owns = visible.some((d) => d.id === seg[3]);
+    if (!owns) return { ok: false, reason: 'No such screen on this server.' };
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const cfg = require('../../config');
+      const row = db.prepare(
+        'SELECT filepath, captured_at FROM screenshots WHERE device_id = ? ORDER BY captured_at DESC LIMIT 1')
+        .get(seg[3]);
+      if (!row) return { ok: false, reason: 'No screenshot has been captured for that screen.' };
+
+      /*
+       * ⚠️ Resolved through basename against the configured directory, exactly as the local route
+       * does. The stored path is data this process wrote, but a proxy is a new way to reach it, and
+       * a path-traversal that was unreachable locally must not become reachable remotely.
+       */
+      const safe = path.resolve(cfg.screenshotsDir, path.basename(row.filepath));
+      if (!safe.startsWith(path.resolve(cfg.screenshotsDir))) {
+        return { ok: false, reason: 'Invalid screenshot path.' };
+      }
+      if (!fs.existsSync(safe)) return { ok: false, reason: 'That screenshot is no longer on disk.' };
+
+      const stat = fs.statSync(safe);
+      // Bounded: a screen capture is a few hundred KB, and anything far larger is not one.
+      if (stat.size > 8 * 1024 * 1024) return { ok: false, reason: 'That screenshot is too large to send.' };
+
+      return {
+        ok: true,
+        image: fs.readFileSync(safe),        // socket.io carries binary natively — no base64 tax
+        mime: 'image/jpeg',
+        capturedAt: row.captured_at,
+        asOf: nowSec(),
+      };
+    } catch (e) {
+      return { ok: false, reason: 'Could not read that screenshot.' };
+    }
+  }
+
   if (seg.length === 5 && seg[2] === 'devices' && seg[4] === 'telemetry') {
     const owns = visible.some((d) => d.id === seg[3]);
     if (!owns) return { ok: false, reason: 'No such screen on this server.' };

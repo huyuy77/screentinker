@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { on, off, requestScreenshot, startRemote, stopRemote, sendTouch, sendSwipe, sendKey, sendCommand } from '../socket.js';
 import { showToast } from '../components/toast.js';
-import { esc, livenessBadge, hydrateAuthImages } from '../utils.js';
+import { esc, livenessBadge, hydrateAuthImages, screenshotUrl } from '../utils.js';
 import { t, tn } from '../i18n.js';
 import { showDeviceOwnerQRModal } from '../components/device-owner-qr-modal.js';
 import { frameDeviceOutput, displayAspectRatio } from '../lib/device-frame.js';
@@ -379,7 +379,7 @@ async function loadDevice(deviceId, activeTab = null) {
       <div class="tab-content active" id="tab-nowplaying">
         <div class="screenshot-container" id="screenshotStage">
           ${device.screenshot
-            ? `<img id="currentScreenshot" src="/api/devices/${device.id}/screenshot?t=${Date.now()}&token=${localStorage.getItem('token')}" alt="Current screen">`
+            ? `<img id="currentScreenshot" src="${screenshotUrl(device.id, Date.now())}" alt="Current screen">`
             : `<div class="no-screenshot" id="currentScreenshot">
                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                   <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>

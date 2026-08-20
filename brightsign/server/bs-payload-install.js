@@ -293,6 +293,37 @@ async function install(opts) {
   try { fs.unlinkSync(zipPath); } catch (e) { /* not worth failing over */ }
 
   if (!fs.existsSync(entry)) throw new Error('install finished but ' + entry + ' is missing');
+
+  /*
+   * ⚠️ REFRESH THE LAUNCHER TOO, or the update path can never update itself.
+   *
+   * The box boots the ROOT-level bs-server-boot.js, which arrives in the boot zip. The payload
+   * carries its own copy under brightsign/server/ and never touched the root one — so a launcher
+   * shipped with an update-check could update payloads forever while remaining, itself, whatever
+   * version was first dropped on the card. Every later fix to the boot path would need somebody
+   * physically re-dropping a zip on every player.
+   *
+   * ⚠️ THIS IS THE RISKIEST COPY IN THE PROJECT, and it is bounded deliberately: it runs only AFTER
+   * the checksum matched and server/server.js was verified present, it keeps .prev copies, and a
+   * broken launcher is NOT a brick — autorun.brs is the real boot entry, it comes from the boot zip,
+   * and it paints the diagnostic screen when the widget fails. That screen plus DWS is the recovery
+   * path, and it is the same one used to get this box onto 2.0.0-alpha0 in the first place.
+   */
+  for (const name of ['bs-server-boot.js', 'bs-payload-install.js']) {
+    try {
+      const from = path.join(installDir, 'brightsign', 'server', name);
+      const to = path.join(installDir, name);
+      if (!fs.existsSync(from)) continue;
+      if (fs.existsSync(to) && fs.readFileSync(from, 'utf8') === fs.readFileSync(to, 'utf8')) continue;
+      if (fs.existsSync(to)) fs.copyFileSync(to, to + '.prev');
+      fs.copyFileSync(from, to);
+      say('installing', 'refreshed ' + name, null);
+    } catch (e) {
+      // A launcher that could not be refreshed is the one we already have, which works.
+      say('installing', 'kept existing ' + name, null);
+    }
+  }
+
   say('installed', `${result.files} files`, 100);
   return result;
 }

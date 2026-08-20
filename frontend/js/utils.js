@@ -111,3 +111,26 @@ export function hydrateAuthImages(root, { eager = false } = {}) {
   }
   imgs.forEach(img => _authImgObserver.observe(img));
 }
+
+
+/*
+ * Where a screen's picture comes from.
+ *
+ * ⚠️ A REMOTE SCREEN'S IMAGE IS NOT AT A LOCAL PATH, and pointing an <img> at one is how a remote
+ * device page ends up with an empty frame and no error. The row said a screenshot existed — the
+ * mirror carries the metadata — but the FILE lives on the other server's disk, so the browser asked
+ * this server for an image it has never had.
+ *
+ * The mesh proxy fetches the bytes from the machine that owns them; the child still applies the
+ * display-capture grant, so this is a different route to the same permission, never around it.
+ */
+export function screenshotUrl(deviceId, stamp) {
+  const token = localStorage.getItem('token');
+  let org = null;
+  try { org = JSON.parse(localStorage.getItem('st_remote_org') || 'null'); } catch (e) { org = null; }
+  if (org && org.nodeId) {
+    return `/api/mesh/screenshot/${encodeURIComponent(org.nodeId)}/${encodeURIComponent(deviceId)}` +
+           `?t=${stamp || ''}&token=${token}`;
+  }
+  return `/api/devices/${deviceId}/screenshot?t=${stamp || ''}&token=${token}`;
+}

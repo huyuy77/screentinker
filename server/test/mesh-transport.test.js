@@ -873,3 +873,37 @@ test('a batch that cannot be unpacked is refused, never relayed onward', async (
     assert.equal(hub.received.length, 0);
   } finally { up.stop(); await hub.close(); }
 });
+
+test('⚠️ a SCREENSHOT needs display-capture, and travels as bytes', async () => {
+  /*
+   * The gap this closes: the mirror carries a screenshot ROW when the grant allows, and that row
+   * names a file on the CHILD's disk. A remote device page therefore pointed an <img> at a local
+   * path this server has never had — an empty picture frame, no error, and a field that said the
+   * screenshot existed.
+   *
+   * display-capture is its own grant because a screen capture is not metadata about a screen: it is
+   * a picture of whatever was visible on it.
+   */
+  const readProxy = require('../lib/mesh/read-proxy');
+  const denied = readProxy.authorize({}, '/api/devices/d1/screenshot', 'GET',
+                                     ['health', 'identity', 'content-metadata']);
+  assert.equal(denied.ok, false, 'a rich grant without display-capture still cannot see the screen');
+  assert.match(denied.reason, /display-capture/);
+
+  const allowed = readProxy.authorize({}, '/api/devices/d1/screenshot', 'GET', ['display-capture']);
+  assert.equal(allowed.ok, true);
+
+  // And it is still a read: the write refusal applies to this path like any other.
+  assert.equal(readProxy.authorize({}, '/api/devices/d1/screenshot', 'POST', ['display-capture']).ok,
+    false);
+});
+
+test('the screenshot path is not reachable by traversal', () => {
+  // ⚠️ A proxy is a NEW way to reach an old file. A path that was unreachable locally must not
+  // become reachable remotely just because a different door was added.
+  const readProxy = require('../lib/mesh/read-proxy');
+  for (const bad of ['/api/devices/../users/screenshot', '/api/devices//screenshot',
+                     '/api/devices/d1/screenshot/../../etc']) {
+    assert.equal(readProxy.authorize({}, bad, 'GET', ['display-capture']).ok, false, bad);
+  }
+});

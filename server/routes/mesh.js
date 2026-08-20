@@ -477,6 +477,44 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     res.json(answer);
   });
 
+  /**
+   * GET /api/mesh/screenshot/:nodeId/:deviceId — a remote screen's picture, proxied as an image.
+   *
+   * ⚠️ ITS OWN ROUTE BECAUSE IT RETURNS BYTES, NOT JSON. /mesh/read wraps everything in an envelope,
+   * which is right for data and useless for an <img src>: a browser needs the image with a content
+   * type, not a JSON object containing one. Squeezing it through the JSON route would have meant
+   * base64 in a response body and a data: URL on the page — larger, slower, and uncacheable.
+   *
+   * Scoped before it asks, like every other route here, and the CHILD still applies the
+   * display-capture grant: this endpoint cannot be a way around it.
+   */
+  router.get('/screenshot/:nodeId/:deviceId', requireAuth, async (req, res) => {
+    const ids = visibleNodeIds(req.user);
+    if (!ids.includes(req.params.nodeId)) return res.status(404).json({ error: 'No such server.' });
+    const readFrom = global.__meshReadFrom;
+    if (!readFrom) return res.status(503).json({ error: 'Not accepting connections from others.' });
+
+    const answer = await readFrom(req.params.nodeId, {
+      path: `/api/devices/${encodeURIComponent(req.params.deviceId)}/screenshot`,
+      method: 'GET',
+    });
+    if (!answer || !answer.ok || !answer.image) {
+      /*
+       * ⚠️ 404 for "no screenshot", 503 for "cannot reach that server". They look the same to a
+       * browser rendering a broken image, and mean opposite things to whoever has to fix it.
+       */
+      return res.status(answer && answer.offline ? 503 : 404)
+        .json({ error: (answer && answer.reason) || 'No screenshot available.' });
+    }
+
+    const buf = Buffer.isBuffer(answer.image) ? answer.image : Buffer.from(answer.image);
+    res.set('Content-Type', answer.mime || 'image/jpeg');
+    // Last-known by definition: the child captured it whenever it captured it, not on this request.
+    res.set('Cache-Control', 'no-cache');
+    if (answer.capturedAt) res.set('X-Captured-At', String(answer.capturedAt));
+    res.send(buf);
+  });
+
   /** GET /api/mesh/topology — the graph, for the topology view. */
   router.get('/topology', requireAuth, (req, res) => {
     const now = nowSec();

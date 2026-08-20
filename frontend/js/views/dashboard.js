@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { on, off, requestScreenshot } from '../socket.js';
 import { showToast } from '../components/toast.js';
-import { esc, livenessBadge, isPlatformAdmin } from '../utils.js';
+import { esc, livenessBadge, isPlatformAdmin, screenshotUrl } from '../utils.js';
 import { t, tn } from '../i18n.js';
 import * as gettingStarted from '../components/getting-started.js';
 import { showDeviceOwnerQRModal } from '../components/device-owner-qr-modal.js';
@@ -98,8 +98,11 @@ function frameCardScreenshots(root) {
 
 function renderDeviceCard(device) {
   const token = localStorage.getItem('token');
-  const screenshotUrl = device.screenshot_path
-    ? `/api/devices/${device.id}/screenshot?t=${device.screenshot_at || ''}&token=${token}`
+  // ⚠️ NOT named screenshotUrl: that is the imported helper, and a const of the same name shadows
+  // it in this scope — the call below would hit the temporal dead zone and throw before rendering
+  // a single card. The same class of crash as the boot TDZ that took production down.
+  const shotSrc = device.screenshot_path
+    ? screenshotUrl(device.id, device.screenshot_at || '')
     : null;
 
   const checked = selectedDeviceIds.has(device.id);
@@ -113,8 +116,8 @@ function renderDeviceCard(device) {
         <input type="checkbox" class="device-select-cb" data-device-id="${device.id}"${checked ? ' checked' : ''}>
       </label>
       <div class="device-card-preview" id="preview-${device.id}" data-orientation="${esc(device.orientation || 'landscape')}">
-        ${screenshotUrl
-          ? `<img src="${screenshotUrl}" alt="Screenshot" loading="lazy">`
+        ${shotSrc
+          ? `<img src="${shotSrc}" alt="Screenshot" loading="lazy">`
           : `<div class="no-preview">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>

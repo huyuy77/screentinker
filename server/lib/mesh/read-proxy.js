@@ -32,6 +32,14 @@ const READABLE = Object.freeze([
   { pattern: '/api/devices',                  grant: 'health',           scope: 'workspace' },
   { pattern: '/api/devices/:id',              grant: 'health',           scope: 'workspace' },
   { pattern: '/api/devices/:id/telemetry',    grant: 'health',           scope: 'workspace' },
+  /*
+   * ⚠️ ITS OWN GRANT, and the strictest one here. A screenshot is not metadata about a screen — it
+   * is a picture of whatever was on it, which may include anything that happened to be visible
+   * behind the signage. `display-capture` exists precisely so a client can share health and content
+   * without sharing images, and this must never fall back to a weaker grant.
+   */
+  { pattern: '/api/devices/:id/screenshot',   grant: 'display-capture',  scope: 'workspace',
+    binary: true },
   { pattern: '/api/assignments/device/:id',   grant: 'content-metadata', scope: 'workspace' },
   { pattern: '/api/groups',                   grant: 'identity',         scope: 'workspace' },
   { pattern: '/api/playlists',                grant: 'content-metadata', scope: 'workspace' },
