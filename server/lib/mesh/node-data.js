@@ -171,7 +171,14 @@ function nodeHealth(db, nodeId) {
     .get();
   return mirror.projectNodeHealth({
     node_id: nodeId,
-    version: require('../package.json').version,
+    /*
+     * ⚠️ '../../' — this file moved from services/ to lib/mesh/ and the relative path did not move
+     * with it. The throw was caught by the reporting loop's own try/catch and logged as "could not
+     * build a report", so the child would have gone silent while looking healthy: connected, no
+     * error surfaced to the operator, and no data arriving. A measurement script found it, not a
+     * test, because every test injects its own version rather than reading package.json.
+     */
+    version: require('../../package.json').version,
     device_count: counts.total || 0,
     devices_online: counts.online || 0,
     reported_at: nowSec(),
