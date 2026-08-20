@@ -1,5 +1,73 @@
 # Changelog
 
+## 2.0.0-alpha0
+
+The first build of **Node Mesh**: connecting one ScreenTinker server to another, so an operator
+running several of them — or an MSP watching customers who each run their own — can see and work
+across all of them from one place.
+
+⚠️ **This is an alpha, on the `2.0.0` branch, and the mesh is off by default.** With
+`MESH_ACCEPT_ENROLLMENT` and `MESH_ALLOW_UPLINK` unset there is no new API surface, no new socket
+namespace, no background work and nothing new in the UI. An install that never sets them should be
+indistinguishable from 1.9.x.
+
+### Added — one server can observe another
+
+Two servers pair with a short-lived, single-use code. The side **giving** the data decides what
+travels: a grant is an explicit list of categories (health, identity, what is scheduled to play,
+proof of play, screenshots…), each described in plain language at the moment of the decision rather
+than as a vocabulary to look up. `[]` means nothing is shared, and it is the default.
+
+A server also chooses **which workspaces** go up. Sharing every workspace — including ones created
+later — is the instance owner's decision alone; anyone else names workspaces they administer, and
+naming one they do not is refused rather than quietly trimmed.
+
+Connected servers appear as **orgs in the ordinary workspace switcher**, and their screens in the
+ordinary Displays list, with the device page rendering exactly as it does for a local screen. It is
+read-only for now, said once in a banner rather than as a disabled state on every button.
+
+### Added — Servers, Activity and Reports
+
+- **Servers** — the connected servers, the topology (per-link health, version skew, depth limit) and
+  pairing.
+- **Activity** now shows open alerts from *every* connected server beside this one's. There is no
+  such thing as "a remote outage" to the person on call; there is an outage.
+- **Reports** gains a per-client uptime report with a CSV export — the artifact an MSP hands a
+  customer. ⚠️ It reports **coverage** beside uptime, because a site whose link died a week ago sends
+  no incidents and would otherwise score a flawless 100%.
+
+### Changed — status is tri-state
+
+A remote screen is *online*, *offline*, or **last known** — amber, not red — when the server that
+reports it cannot currently be reached. A WAN blip on one link must never paint 400 healthy screens
+red and send an engineer to a working site. Every remote row carries its age.
+
+### Changed — telemetry
+
+`wifi_ssid` is no longer collected, stored or displayed. 94% of its values were not SSIDs at all, and
+the ones that were are customer network names, which are geolocatable against public wardriving
+databases. Signal strength stays: the name was the liability, the signal is what an installer acts
+on. `cpu_usage` is rounded at the source, where nothing has ever displayed more than a whole percent.
+
+### Performance
+
+A reporting child sends **one batched message per cycle instead of one per screen** — 402 messages a
+minute becomes one for a 400-screen site — compressed on the body, which takes a cycle from 227 KB to
+around 8 KB. Batching is negotiated: a server that does not understand batches is sent individual
+payloads exactly as before. Reads served to a parent run on a **worker thread** where the platform
+has one, and inline where it does not, with both paths returning the same answer.
+
+### Known limits in this alpha
+
+- **Read-only.** A connected server can be observed and browsed, not changed. The vocabulary for
+  write grants exists and is deliberately unused.
+- **Two tiers.** `MESH_MAX_DEPTH` is 2. Deeper trees are implemented and tested but stay locked until
+  two tiers have run on real hardware.
+- Content, schedules, widgets and layouts are not yet readable across a link, so those panels are
+  empty when viewing another server rather than showing your own.
+- Both sides of a link must be on 2.0.0 or newer.
+
+
 ## 1.9.39
 
 A single wording change, following feedback on the white-label work in 1.9.38.
