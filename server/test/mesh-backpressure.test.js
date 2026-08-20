@@ -99,7 +99,9 @@ test('a child under its limits reports healthy', () => {
   const st = bp.statusFor('a', T0);
   assert.equal(st.throttled, false);
   assert.equal(st.messagesThisWindow, 1);
-  assert.deepEqual(st.refused, { rate: 0, bytes: 0, store: 0 });
+  // ⚠️ `items` joined the counters when batching landed: a batch is one message carrying many
+  // payloads, so counting messages alone would let batching walk past the rate limit entirely.
+  assert.deepEqual(st.refused, { rate: 0, items: 0, bytes: 0, store: 0 });
 });
 
 test('disenrolling a child forgets its budget', () => {

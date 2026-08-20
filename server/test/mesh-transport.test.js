@@ -557,3 +557,319 @@ test('the workspace scope narrows a proxied read', () => {
     'unfiled rows travel; another workspace does not');
   assert.equal(readProxy.scopeRows(rows, null).length, 3, 'null means every workspace');
 });
+
+// ===== batching =====
+
+test('⚠️ A CHILD DOES NOT BATCH UNTIL THE PARENT SAYS IT CAN', async () => {
+  /*
+   * The compatibility property the whole design rests on. An older parent treats `batch` as an
+   * unknown type, so I5 applies — relay it, do not store it — and it would forward a batch and store
+   * NOTHING, with no error on either side. A mixed-version mesh would lose telemetry invisibly.
+   */
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    await waitFor(() => up.parentCapabilities !== null, 4000);
+    assert.ok(up.batchLimits(), 'this parent advertises batch-v1');
+
+    // Simulate an older parent: forget what it told us.
+    up.parentCapabilities = null;
+    assert.equal(up.batchLimits(), null);
+
+    const mk = (i) => envelope.createEnvelope({
+      originNodeId: CHILD_ID, type: 'node-health', bodyVersion: 1,
+      ancestry: [CHILD_ID], originTs: Date.now(), body: { i },
+    });
+    up.sendMany([mk(1), mk(2), mk(3)], { nodeId: CHILD_ID, ancestry: [CHILD_ID] });
+    await waitFor(() => hub.received.length === 3, 4000);
+    assert.ok(hub.received.every((r) => r.env.type === 'node-health'),
+      'it falls back to individual envelopes, exactly as today');
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('⚠️ capabilities are FORGOTTEN on disconnect', () => {
+  /*
+   * The next connection may be to a different parent, or the same one downgraded. A stale "it
+   * supports batching" would send batches into a node that relays them without storing — the silent
+   * failure again, arriving through a reconnect nobody thought about.
+   */
+  const fs = require('node:fs');
+  const src = fs.readFileSync(require.resolve('../lib/mesh/uplink.js'), 'utf8');
+  const onDisconnect = src.slice(src.indexOf("this.socket.on('disconnect'"));
+  assert.match(onDisconnect.slice(0, 800), /this\.parentCapabilities = null/);
+});
+
+test('a batch arrives as items, applied as a group', async () => {
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    await waitFor(() => up.batchLimits() !== null, 4000);
+
+    const mk = (id) => envelope.createEnvelope({
+      originNodeId: CHILD_ID, type: 'device-summary', bodyVersion: 1,
+      ancestry: [CHILD_ID], originTs: Date.now(), body: { id, status: 'online' },
+    });
+    up.sendMany([mk('d1'), mk('d2'), mk('d3')], { nodeId: CHILD_ID, ancestry: [CHILD_ID] });
+
+    await waitFor(() => hub.received.length === 1, 4000);
+    const { env, meta } = hub.received[0];
+    assert.equal(env.type, 'batch', 'one message on the wire');
+    assert.equal(meta.batch.length, 3, 'three payloads handed over together');
+    assert.deepEqual(meta.batch.map((e) => e.body.id), ['d1', 'd2', 'd3'], 'in order');
+    assert.ok(meta.batch.every((e) => e.type === 'device-summary'),
+      'each item is expressed as the envelope the storage layer already knows');
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('⚠️ ONE BAD ITEM COSTS EXACTLY ONE BAD ITEM (I6)', async () => {
+  /*
+   * All-or-nothing means a single malformed item from a newer child discards every good one beside
+   * it — and the child, seeing a rejection, retries the identical batch forever.
+   */
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    const good = { type: 'device-summary', body_version: 1, origin_ts: Date.now(), body: { id: 'd1' } };
+    const bad = { type: 'device-summary', body_version: 1, body: { id: 'd2' } };   // no origin_ts
+    const batch = envelope.createBatch({
+      originNodeId: CHILD_ID, ancestry: [CHILD_ID], originTs: Date.now(),
+      items: [good, bad, { ...good, body: { id: 'd3' } }],
+    });
+
+    const ack = await new Promise((resolve) => up.socket.emit('mesh:envelope', batch, resolve));
+    assert.equal(ack.ok, true);
+    assert.equal(ack.accepted, 2, 'the good items land');
+    assert.equal(ack.rejected.length, 1);
+    assert.equal(ack.rejected[0].index, 1, 'and the caller is told WHICH');
+    assert.match(ack.rejected[0].reason, /origin timestamp/);
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('⚠️ A FORGED ITEM IS REJECTED even inside an honest batch', async () => {
+  /*
+   * Attestation runs PER ITEM. A relay legitimately carries items from several origins, so checking
+   * only the batch would let a compromised child slip in an item claiming a peer's origin and have
+   * it accepted on the batch's credentials — data about a site it merely shares a hub with.
+   */
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    const mine = { type: 'device-summary', body_version: 1, origin_ts: Date.now(), body: { id: 'd1' } };
+    const theirs = { ...mine, origin_node_id: 'someone-elses-node', body: { id: 'stolen' } };
+    const batch = envelope.createBatch({
+      originNodeId: CHILD_ID, ancestry: [CHILD_ID], originTs: Date.now(), items: [mine, theirs],
+    });
+
+    const ack = await new Promise((resolve) => up.socket.emit('mesh:envelope', batch, resolve));
+    assert.equal(ack.accepted, 1, 'only the item it may speak for');
+    assert.equal(ack.rejected.length, 1);
+    assert.match(ack.rejected[0].reason, /own subtree/);
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('an unknown type inside a batch is relayed, not stored, and not rejected (I5)', async () => {
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    const batch = envelope.createBatch({
+      originNodeId: CHILD_ID, ancestry: [CHILD_ID], originTs: Date.now(),
+      items: [
+        { type: 'device-summary', body_version: 1, origin_ts: Date.now(), body: { id: 'd1' } },
+        { type: 'invented-in-2027', body_version: 1, origin_ts: Date.now(), body: { x: 1 } },
+      ],
+    });
+    const ack = await new Promise((resolve) => up.socket.emit('mesh:envelope', batch, resolve));
+    assert.equal(ack.accepted, 1);
+    assert.equal(ack.relayed, 1, 'forwarded, not understood, not refused');
+    assert.equal(ack.rejected.length, 0);
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('a batch may not contain a batch', () => {
+  // ⚠️ Nesting turns every bound — item count, byte size, the per-item loop — into a recursive
+  // problem, which is how a size limit stops being one.
+  const v = envelope.validateItem(
+    { type: 'batch', body_version: 1, origin_ts: Date.now(), body: {} },
+    { batchOriginNodeId: 'n1' });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /may not contain a batch/);
+});
+
+test('⚠️ batches are CHUNKED below the receiver\'s limit', () => {
+  /*
+   * The parent's limits are authoritative — a sender's own defaults are a guess about somebody
+   * else's box — and the chunk is flushed BEFORE the item that would breach the bound. Overshooting
+   * by one item is how a batch trips socket.io's maxHttpBufferSize and fails with an error that says
+   * nothing about batching.
+   */
+  const sent = [];
+  const up = new Uplink({
+    parentUrl: 'http://x', edgeToken: 't', nodeId: 'n1', logger: quietLogger,
+    connect: () => ({ on() {}, close() {} }),
+  });
+  up.parentCapabilities = { supports: ['batch-v1'], maxBatchItems: 10, maxBatchBytes: 1024 * 1024 };
+  up.send = (env) => { sent.push(env); return true; };
+
+  const mk = (i) => envelope.createEnvelope({
+    originNodeId: 'n1', type: 'device-summary', bodyVersion: 1,
+    ancestry: ['n1'], originTs: Date.now(), body: { id: `d${i}` },
+  });
+  up.sendMany(Array.from({ length: 25 }, (_, i) => mk(i)), { nodeId: 'n1', ancestry: ['n1'] });
+
+  assert.equal(sent.length, 3, '25 items at 10 per batch');
+  assert.deepEqual(sent.map((b) => b.body.items.length), [10, 10, 5]);
+  assert.ok(sent.every((b) => b.type === 'batch'));
+});
+
+test('⚠️ BACKPRESSURE COUNTS ITEMS, so batching is not a way around the rate limit', () => {
+  const { Backpressure } = require('../lib/mesh/backpressure');
+  const bp = new Backpressure();
+  let admitted = 0;
+  // One message per batch, but 400 payloads each: the message counter would never notice.
+  for (let i = 0; i < 20; i++) if (bp.admit('c', 5000, 0, 400).ok) admitted++;
+  assert.ok(admitted < 20, 'the item budget bites even though the message budget would not');
+  const refusal = bp.admit('c', 5000, 0, 400);
+  assert.equal(refusal.limit, 'items');
+  assert.match(refusal.reason, /Batching reduces messages, not the amount of data/);
+
+  // ⚠️ And it rolls with the window: a counter checked but never reset throttles forever.
+  assert.equal(bp.admit('c', 5000, 999_999, 400).ok, true);
+});
+
+test('⚠️ a RELAYED item is accepted when its own chain proves the path', async () => {
+  /*
+   * The other half of the attestation rule, and the reason it cannot simply be "origin must be the
+   * child". A relay legitimately carries payloads from below it — a grandchild's data reaching the
+   * hub through the child — and that is credible exactly when the item's OWN ancestry shows the
+   * sending child on the path it took.
+   */
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    const batch = envelope.createBatch({
+      originNodeId: CHILD_ID, ancestry: [CHILD_ID], originTs: Date.now(),
+      items: [
+        { type: 'device-summary', body_version: 1, origin_ts: Date.now(), body: { id: 'mine' } },
+        // From a grandchild, relayed by this child — the chain says so.
+        { type: 'device-summary', body_version: 1, origin_ts: Date.now(),
+          origin_node_id: 'grandchild', ancestry: ['grandchild', CHILD_ID], body: { id: 'theirs' } },
+        // Claims a grandchild but shows a path this child is not on.
+        { type: 'device-summary', body_version: 1, origin_ts: Date.now(),
+          origin_node_id: 'elsewhere', ancestry: ['elsewhere', 'some-other-hub'], body: { id: 'forged' } },
+      ],
+    });
+
+    const ack = await new Promise((resolve) => up.socket.emit('mesh:envelope', batch, resolve));
+    assert.equal(ack.accepted, 2, 'its own, and the one it can prove it relayed');
+    assert.equal(ack.rejected.length, 1);
+    assert.equal(ack.rejected[0].index, 2, 'the unprovable one, and only that one');
+    assert.match(ack.rejected[0].reason, /own subtree/);
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('⚠️ a COMPRESSED batch survives the real wire, as binary', async () => {
+  /*
+   * socket.io carries binary natively as an attachment, so the payload travels as bytes rather than
+   * base64 — which would have made it ~33% LARGER for the privilege of being text nobody reads.
+   */
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    await waitFor(() => up.batchLimits() !== null, 4000);
+    assert.equal(up.batchLimits().encoding, 'br', 'the first encoding both sides can do');
+
+    const mk = (i) => envelope.createEnvelope({
+      originNodeId: CHILD_ID, type: 'device-summary', bodyVersion: 1,
+      ancestry: [CHILD_ID], originTs: Date.now(),
+      body: { id: `d${i}`, name: `Store ${i}`, status: 'online', storage_free_mb: 4096 },
+    });
+    up.sendMany(Array.from({ length: 50 }, (_, i) => mk(i)), { nodeId: CHILD_ID, ancestry: [CHILD_ID] });
+
+    await waitFor(() => hub.received.length === 1, 4000);
+    const { env, meta } = hub.received[0];
+    assert.equal(env.body.enc, 'br', 'compressed on the wire');
+    assert.equal(meta.batch.length, 50, 'and all fifty arrive');
+    assert.equal(meta.batch[7].body.name, 'Store 7', 'intact');
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('a batch sent plainly still works when there is no shared encoding', () => {
+  // ⚠️ A peer that cannot decode is worse off than one that received it plainly, so no overlap
+  // means no compression rather than a payload the far side cannot open.
+  const up = new Uplink({ parentUrl: 'http://x', edgeToken: 't', nodeId: 'n1',
+                          connect: () => ({ on() {}, close() {} }), logger: quietLogger });
+  up.parentCapabilities = { supports: ['batch-v1'], encodings: ['lzma-9000'] };
+  assert.equal(up.batchLimits().encoding, null);
+
+  const b = envelope.createBatch({ originNodeId: 'n1', ancestry: ['n1'], originTs: Date.now(),
+    items: [{ type: 'node-health', body_version: 1, origin_ts: Date.now(), body: { ok: true } }],
+    encoding: null });
+  assert.ok(Array.isArray(b.body.items), 'plain items, readable by anyone');
+  assert.equal(envelope.batchItems(b).length, 1);
+});
+
+test('⚠️ A DECOMPRESSION BOMB IS REFUSED, not unpacked', () => {
+  /*
+   * Brotli will turn a kilobyte into gigabytes, so a bound on what ARRIVES is no bound at all — the
+   * payload has to be refused by how large it BECOMES. zlib enforces that during the decode rather
+   * than after allocating.
+   */
+  const zlib = require('node:zlib');
+  const huge = Buffer.alloc(envelope.BATCH_LIMITS.maxDecodedBytes * 4, 0x41);
+  const bomb = zlib.brotliCompressSync(huge);
+  assert.ok(bomb.length < 64 * 1024, 'a small payload that expands enormously');
+
+  const items = envelope.decodeItems({ enc: 'br', count: 1, data: bomb });
+  assert.equal(items, null, 'refused rather than expanded');
+});
+
+test('⚠️ an UNDER-DECLARED batch is refused outright', async () => {
+  /*
+   * Backpressure charges for what a batch SAYS it holds, before unpacking it — otherwise a
+   * compressed payload buys a free pass through the limit that exists to stop exactly that.
+   * Refused rather than re-charged: under-declaring is not a mistake anyone makes by accident.
+   */
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    const items = Array.from({ length: 20 }, (_, i) => ({
+      type: 'device-summary', body_version: 1, origin_ts: Date.now(), body: { id: `d${i}` },
+    }));
+    const batch = envelope.createBatch({
+      originNodeId: CHILD_ID, ancestry: [CHILD_ID], originTs: Date.now(), items, encoding: 'br' });
+    batch.body.count = 1;      // the lie
+
+    const ack = await new Promise((resolve) => up.socket.emit('mesh:envelope', batch, resolve));
+    assert.equal(ack.ok, false);
+    assert.match(ack.reason, /more payloads than it declared/);
+    assert.equal(hub.received.length, 0, 'and nothing was stored');
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('a batch that cannot be unpacked is refused, never relayed onward', async () => {
+  // ⚠️ Forwarding bytes this node could not read would push an unbounded decompression problem one
+  // hop further up, and the hop that finally opens it is the one that pays.
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    const batch = envelope.createBatch({
+      originNodeId: CHILD_ID, ancestry: [CHILD_ID], originTs: Date.now(),
+      items: [{ type: 'node-health', body_version: 1, origin_ts: Date.now(), body: {} }],
+      encoding: 'br' });
+    batch.body.data = Buffer.from('not actually brotli');
+
+    const ack = await new Promise((resolve) => up.socket.emit('mesh:envelope', batch, resolve));
+    assert.equal(ack.ok, false);
+    assert.match(ack.reason, /could not be unpacked/);
+    assert.equal(hub.received.length, 0);
+  } finally { up.stop(); await hub.close(); }
+});

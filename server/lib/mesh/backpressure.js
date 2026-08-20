@@ -30,6 +30,17 @@
 const DEFAULTS = Object.freeze({
   windowMs: 10_000,
   maxMessages: 600,          // ~1/s sustained with headroom for a burst after reconnect
+  /*
+   * ⚠️ ITEMS, NOT JUST MESSAGES — the limit batching would otherwise walk straight past. maxMessages
+   * is a proxy for volume, and one message carrying 5,000 rows sails through a cap designed to stop
+   * exactly that. Without this, batching is a way AROUND the rate limit rather than a way to be
+   * polite about it.
+   *
+   * Set well above a legitimate cycle (a 400-screen child sends ~402 items a minute) and well below
+   * a runaway: a child flushing its whole 5,000-envelope buffer is admitted over a few windows
+   * rather than in one gulp.
+   */
+  maxItems: 3_000,
   maxBytes: 4 * 1024 * 1024, // 4MB per window
   maxStoredRows: 250_000,    // per child, before the parent starts refusing new history
 });
@@ -40,11 +51,12 @@ class ChildBudget {
     this.limits = limits;
     this.windowStart = 0;
     this.messages = 0;
+    this.items = 0;
     this.bytes = 0;
     this.storedRows = 0;
     // Counters, not just booleans: "throttled 40,000 times since Tuesday" is a different
     // conversation from "throttled twice", and the UI should be able to tell them apart.
-    this.refused = { rate: 0, bytes: 0, store: 0 };
+    this.refused = { rate: 0, items: 0, bytes: 0, store: 0 };
     this.lastRefusalAt = null;
   }
 
@@ -52,6 +64,10 @@ class ChildBudget {
     if (now - this.windowStart >= this.limits.windowMs) {
       this.windowStart = now;
       this.messages = 0;
+      // ⚠️ Reset with the others. A counter that is checked but never rolled climbs until it
+      // trips permanently — the child would be throttled forever, a few windows after a busy one,
+      // for traffic it is no longer sending.
+      this.items = 0;
       this.bytes = 0;
     }
   }
@@ -83,7 +99,13 @@ class Backpressure {
    *
    * @returns {{ok: true} | {ok: false, limit: 'rate'|'bytes'|'store', reason: string, retryAfterMs: number}}
    */
-  admit(childId, sizeBytes, now) {
+  /**
+   * @param {string} childId
+   * @param {number} sizeBytes
+   * @param {number} now
+   * @param {number} [itemCount=1]  payloads carried — a batch counts every item it holds
+   */
+  admit(childId, sizeBytes, now, itemCount = 1) {
     const b = this.budgetFor(childId);
     b._roll(now);
 
@@ -121,6 +143,25 @@ class Backpressure {
       };
     }
 
+    /*
+     * ⚠️ The check batching exists for. A batch is ONE message carrying many payloads, so counting
+     * messages alone would let a child move unlimited volume by wrapping it — the exact behaviour
+     * the rate limit was written to prevent, arriving through the door we just opened.
+     */
+    if (b.items + itemCount > this.limits.maxItems) {
+      b.refused.items++;
+      b.lastRefusalAt = now;
+      return {
+        ok: false,
+        limit: 'items',
+        retryAfterMs,
+        reason: `"${childId}" is sending more than ${this.limits.maxItems.toLocaleString()} ` +
+                `payloads per ${this.limits.windowMs / 1000}s and is being throttled. Batching ` +
+                `reduces messages, not the amount of data — its own reports are delayed, and no ` +
+                `other connection is affected.`,
+      };
+    }
+
     const size = Number.isFinite(sizeBytes) ? sizeBytes : 0;
     if (b.bytes + size > this.limits.maxBytes) {
       b.refused.bytes++;
@@ -136,6 +177,8 @@ class Backpressure {
     }
 
     b.messages++;
+
+    b.items += itemCount;
     b.bytes += size;
     return { ok: true };
   }

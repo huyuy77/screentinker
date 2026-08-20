@@ -47,6 +47,30 @@ module.exports = function setupWebSockets(io) {
           onEnvelope: (edge, env, meta) => {
             store.touchEdge(db, edge.id);
             if (meta && meta.relayOnly) return;   // I5: relayed, not interpreted, not stored
+
+            /*
+             * ⚠️ A BATCH IS APPLIED IN ONE TRANSACTION, and its items IN ORDER.
+             *
+             * One transaction because four hundred separate writes mean four hundred fsyncs, which
+             * is most of what batching set out to save. In order because a tombstone followed by an
+             * upsert for the same screen must land that way round — as a set, the screen comes back
+             * deleted.
+             *
+             * Validation already happened per item upstream, so everything here is known-good: the
+             * transaction cannot roll back a good item because of a bad neighbour, since bad
+             * neighbours never reached it.
+             */
+            if (meta && Array.isArray(meta.batch)) {
+              try {
+                db.transaction(() => {
+                  for (const item of meta.batch) mirrorStore.storeEnvelope(db, edge, item);
+                })();
+              } catch (e) {
+                console.warn(`[mesh] could not store a batch from ${edge.peer_node_id}: ${e && e.message}`);
+              }
+              return;
+            }
+
             try {
               mirrorStore.storeEnvelope(db, edge, env);
             } catch (e) {

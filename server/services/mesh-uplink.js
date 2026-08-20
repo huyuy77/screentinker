@@ -88,16 +88,23 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
       ancestry: [me], originTs: Date.now(), body,
     });
 
-    // Node health always: it is this node reporting on itself, the minimum any edge exists for.
-    link.send(mk('node-health', nodeHealth(db, me)));
-
-    // Workspaces before devices, so a device arriving first never references a workspace the parent
-    // has not seen — the parent tolerates it, but the UI would flicker a screen into "unfiled" and
-    // back out again on the very first sync.
-    for (const w of workspaceProjections(db, grant, edge)) link.send(mk('workspace-summary', w));
-
-    for (const d of deviceProjections(db, grant, edge)) link.send(mk('device-summary', d));
+    /*
+     * ⚠️ ALERTS ARE NOT BATCHED, and that is a product decision rather than an oversight. An alert is
+     * the one payload where latency IS the point; batching it behind four hundred device summaries
+     * adds up to a full cycle of delay to the message an operator is waiting for. "Fewer bytes" and
+     * "better product" are not the same goal, and where they disagree this one wins.
+     */
     for (const a of openAlerts(db, grant, edge)) link.send(mk('alert-event', a));
+
+    /*
+     * Everything else travels together. Node health leads and workspaces precede devices, because a
+     * device arriving before its workspace flickers into "unfiled" and back out again on the very
+     * first sync — order is preserved inside a batch, so this ordering still means something.
+     */
+    const bulk = [mk('node-health', nodeHealth(db, me))];
+    for (const w of workspaceProjections(db, grant, edge)) bulk.push(mk('workspace-summary', w));
+    for (const d of deviceProjections(db, grant, edge)) bulk.push(mk('device-summary', d));
+    link.sendMany(bulk, { nodeId: me, ancestry: [me] });
   }
 
   function tick() {

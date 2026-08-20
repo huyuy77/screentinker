@@ -103,8 +103,8 @@ const edge = {
 };
 
 console.log('\n=== ONE REPORT CYCLE (what a child sends every 60s) ===\n');
-console.log('fleet │ msgs │ raw total │ per-msg deflate │ per-msg brotli │ BATCHED brotli');
-console.log('──────┼──────┼───────────┼─────────────────┼────────────────┼───────────────');
+console.log('fleet │ msgs │ raw total │ per-msg deflate │ BATCHED raw │ batched deflate │ batched brotli');
+console.log('──────┼──────┼───────────┼─────────────────┼─────────────┼─────────────────┼───────────────');
 
 const cycles = {};
 for (const n of FLEETS) {
@@ -122,14 +122,17 @@ for (const n of FLEETS) {
   const raw = msgs.reduce((s, m) => s + B(m), 0);
   const perDeflate = msgs.reduce((s, m) => s + defl(Buffer.from(JSON.stringify(m))), 0);
   const perBrotli = msgs.reduce((s, m) => s + br(Buffer.from(JSON.stringify(m))), 0);
-  const batched = br(Buffer.from(JSON.stringify(msgs)));
-  const batchedRaw = B(msgs);
+  const batchedBuf = Buffer.from(JSON.stringify(msgs));
+  const batchedRaw = batchedBuf.length;
+  const batchedDeflate = defl(batchedBuf);
+  const batched = br(batchedBuf);
 
   cycles[n] = { msgs: msgs.length, raw, perDeflate, perBrotli, batched, batchedRaw };
   console.log(
     `${String(n).padStart(5)} │ ${String(msgs.length).padStart(4)} │ ${kb(raw).padStart(9)} │ ` +
     `${(kb(perDeflate) + ' (' + pct(raw, perDeflate) + ')').padStart(15)} │ ` +
-    `${(kb(perBrotli) + ' (' + pct(raw, perBrotli) + ')').padStart(14)} │ ` +
+    `${kb(batchedRaw).padStart(11)} │ ` +
+    `${(kb(batchedDeflate) + ' (' + pct(raw, batchedDeflate) + ')').padStart(15)} │ ` +
     `${(kb(batched) + ' (' + pct(raw, batched) + ')').padStart(14)}`);
   db.close();
   fs.rmSync(db.__dir, { recursive: true, force: true });

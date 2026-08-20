@@ -14,6 +14,7 @@
  */
 
 const { EventEmitter } = require('events');
+const envelope = require('./envelope');
 
 /*
  * ⚠️ JITTERED BACKOFF, and the jitter is the load-bearing half (#144 precedent).
@@ -77,9 +78,19 @@ class Uplink extends EventEmitter {
     this.attempt = 0;
     this.buffer = [];
     this.dropped = 0;
+    this.rejected = 0;
+    this.lastRejection = null;
     this.lastSyncAt = null;
     this.lastError = null;
     this.throttledUntil = 0;
+
+    /*
+     * ⚠️ NULL UNTIL THE PARENT SAYS OTHERWISE, and batching stays off until it does. A child that
+     * batched unilaterally would be silently ignored by an older parent — `batch` is an unknown type
+     * there, so it gets relayed and not stored, and the telemetry vanishes with no error on either
+     * side. Assuming a capability is how a mixed-version mesh loses data quietly.
+     */
+    this.parentCapabilities = null;
   }
 
   start() {
@@ -127,6 +138,15 @@ class Uplink extends EventEmitter {
       }
     });
 
+    /*
+     * The parent announces what it can unpack, and its limits are authoritative: a sender's own
+     * defaults are a guess about somebody else's box.
+     */
+    this.socket.on('mesh:hello', (hello) => {
+      this.parentCapabilities = hello && typeof hello === 'object' ? hello : null;
+      this.emit('parent-hello', this.parentCapabilities);
+    });
+
     this.socket.on('connect', () => {
       this.connected = true;
       this.attempt = 0;
@@ -144,6 +164,13 @@ class Uplink extends EventEmitter {
 
     this.socket.on('disconnect', (reason) => {
       this.connected = false;
+      /*
+       * ⚠️ FORGOTTEN ON DISCONNECT. The next connection may be to a different parent, or to the same
+       * one downgraded — and a stale "it supports batching" would send batches into a node that
+       * relays them without storing. Re-announced on every connect, so forgetting costs one round
+       * trip and remembering could cost a customer's telemetry.
+       */
+      this.parentCapabilities = null;
       this.emit('disconnected', reason);
       this._scheduleRetry();
     });
@@ -161,6 +188,81 @@ class Uplink extends EventEmitter {
     }, delay);
     // Never hold the process open for an observer.
     if (this._timer.unref) this._timer.unref();
+  }
+
+  /** Does the far side understand batches, and how big may they be? */
+  batchLimits() {
+    const caps = this.parentCapabilities;
+    if (!caps || !Array.isArray(caps.supports) || !caps.supports.includes('batch-v1')) return null;
+    /*
+     * ⚠️ The FIRST encoding both sides can do, in the parent's preference order — and null if there
+     * is no overlap, which sends the batch plainly rather than in a format the far side cannot open.
+     */
+    const theirs = Array.isArray(caps.encodings) ? caps.encodings : [];
+    const encoding = theirs.find((e) => envelope.BATCH_ENCODINGS.includes(e)) || null;
+    return {
+      maxItems: Math.max(1, Math.min(caps.maxBatchItems || envelope.BATCH_LIMITS.maxItems,
+                                     envelope.BATCH_LIMITS.maxItems)),
+      maxBytes: Math.max(1024, Math.min(caps.maxBatchBytes || envelope.BATCH_LIMITS.maxBytes,
+                                        envelope.BATCH_LIMITS.maxBytes)),
+      encoding,
+    };
+  }
+
+  /**
+   * Send many observations, batched if the parent can unpack them and singly if not.
+   *
+   * ⚠️ THE FALLBACK IS THE CURRENT BEHAVIOUR, unchanged. A node talking to an older parent keeps
+   * working exactly as it does today rather than degrading in some new way — which is what makes
+   * this deployable into a running mesh instead of a coordinated upgrade.
+   */
+  sendMany(envelopes, { nodeId, ancestry } = {}) {
+    const list = (envelopes || []).filter(Boolean);
+    if (!list.length) return true;
+
+    const limits = this.batchLimits();
+    if (!limits) {
+      let ok = true;
+      for (const env of list) ok = this.send(env) && ok;
+      return ok;
+    }
+
+    let ok = true;
+    let chunk = [];
+    let bytes = 0;
+
+    const flush = () => {
+      if (!chunk.length) return;
+      ok = this.send(envelope.createBatch({
+        originNodeId: nodeId || this.nodeId,
+        ancestry: ancestry || [nodeId || this.nodeId],
+        originTs: Date.now(),
+        items: chunk,
+        encoding: limits.encoding,
+      })) && ok;
+      chunk = [];
+      bytes = 0;
+    };
+
+    for (const env of list) {
+      /*
+       * ⚠️ Measured per item and flushed BEFORE the item that would breach the bound, not after.
+       * Overshooting by one item is how a batch trips socket.io's maxHttpBufferSize and fails with
+       * an error that says nothing about batching.
+       */
+      const size = JSON.stringify(env).length;
+      if (chunk.length >= limits.maxItems || (bytes + size) > limits.maxBytes) flush();
+      chunk.push({
+        type: env.type,
+        body_version: env.body_version,
+        origin_ts: env.origin_ts,
+        origin_node_id: env.origin_node_id,
+        body: env.body,
+      });
+      bytes += size;
+    }
+    flush();
+    return ok;
   }
 
   /** Queue an envelope for the parent. Returns false only if THIS call had to drop something. */
@@ -206,6 +308,18 @@ class Uplink extends EventEmitter {
     try {
       this.socket.timeout(15_000).emit('mesh:envelope', env, (err, res) => {
         if (err) { this._requeue(env); return; }
+        /*
+         * ⚠️ A PARTIALLY-ACCEPTED BATCH IS NOT RETRIED. The parent answers per item; a rejection is
+         * a statement ABOUT THE PAYLOAD, and re-sending an identical item cannot change it — a child
+         * that retried would loop on the same malformed row forever while the good ones behind it
+         * waited. Recorded so it is visible rather than silent.
+         */
+        if (res && res.batch && Array.isArray(res.rejected) && res.rejected.length) {
+          this.rejected += res.rejected.length;
+          this.lastRejection = res.rejected[0] && res.rejected[0].reason;
+          this.log.warn(`[mesh] parent rejected ${res.rejected.length} of a batch: ` +
+                        `${this.lastRejection}`);
+        }
         if (res && res.throttled) {
           /*
            * ⚠️ Respect the parent's backpressure rather than hammering. The parent already told us
@@ -242,6 +356,11 @@ class Uplink extends EventEmitter {
       retryAttempt: this.attempt,
       buffered: this.buffer.length,
       droppedOldest: this.dropped,
+      // Surfaced in the connection view: "the parent refused 40 payloads" is a different
+      // conversation from "we could not connect", and they must not read the same.
+      rejectedByParent: this.rejected,
+      lastRejection: this.lastRejection,
+      batching: !!this.batchLimits(),
       tlsVerify: this.tlsVerify,
     };
   }
