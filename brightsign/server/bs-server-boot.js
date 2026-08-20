@@ -266,6 +266,19 @@ let installState = { phase: 'idle', detail: '', pct: null };
 let lastLoggedInstall = null;
 
 /*
+ * ⚠️ DECLARED HERE, ABOVE statusFrame(), and the placement is the point rather than tidiness. A
+ * `let` sits in the temporal dead zone until its declaration runs, so declaring it further down —
+ * after the function that reads it — leaves a module whose safety depends on nothing calling that
+ * function too early. That is exactly the shape of the boot TDZ that took production down: fine in
+ * every test, fatal on the one path that mattered.
+ *
+ * Surfaced on the diagnostic screen rather than only logged: a box that installed without being
+ * able to verify what it installed is one somebody may want to reinstall deliberately, and the log
+ * is a 200-entry ring that will have scrolled by the time anyone looks.
+ */
+let unverifiedInstall = false;
+
+/*
  * Is anything actually LISTENING?
  *
  * The screen showed http://192.168.1.46:8080 in large green type while the server was still
@@ -322,6 +335,8 @@ function probeListening() {
 function statusFrame() {
   const mem = process.memoryUsage();
   return {
+    // Present so the diagnostic page can say it, not just the log ring.
+    unverified: unverifiedInstall,
     type: 'st-server-status',
     ip: firstIPv4(),
     port: currentPort(),
@@ -485,6 +500,27 @@ function installedVersion() {
   catch (e) { return null; }
 }
 
+/** The checksum of the payload actually installed, when the install recorded one. */
+function installedSha() {
+  try { return fs.readFileSync(path.join(__dirname, '.payload-sha256'), 'utf8').trim(); }
+  catch (e) { return null; }
+}
+
+/**
+ * Is what is published different from what is installed?
+ *
+ * ⚠️ CHECKSUM FIRST, VERSION SECOND. A version string cannot see a rebuild — every alpha build is
+ * "2.0.0-alpha0", so comparing labels would leave a box convinced it was current while a fix sat
+ * published and unfetched. The checksum answers what the label only approximates.
+ *
+ * Version remains the fallback for a box installed before checksums were recorded: it is the same
+ * comparison as before, so an older install is no worse off than it was.
+ */
+function differs(manifest, have, haveSha) {
+  if (manifest.sha256 && haveSha) return manifest.sha256 !== haveSha;
+  return manifest.version !== have;
+}
+
 /**
  * Is a different payload published?
  *
@@ -496,12 +532,27 @@ function installedVersion() {
  * reach an update server is a far worse outcome than one running last month's build, and it is the
  * failure an operator cannot fix remotely.
  */
-function fetchManifest(cb) {
+function fetchManifest(cb, url, redirectsLeft) {
+  const target = url || MANIFEST_URL;
+  const hops = redirectsLeft === undefined ? 5 : redirectsLeft;
   let done = false;
   const finish = (v) => { if (!done) { done = true; cb(v); } };
   try {
-    const mod = MANIFEST_URL.indexOf('https:') === 0 ? require('https') : require('http');
-    const req = mod.get(MANIFEST_URL, (res) => {
+    const mod = target.indexOf('https:') === 0 ? require('https') : require('http');
+    const req = mod.get(target, (res) => {
+      /*
+       * ⚠️ FOLLOW REDIRECTS, because the downloader does and these two must agree about what a URL
+       * means. A host that answers the payload through a redirect would answer the manifest the
+       * same way — so a fetch that treated 302 as failure would report "no manifest published" on
+       * exactly the hosts where the payload downloads perfectly well.
+       */
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (hops <= 0) return finish(null);
+        try {
+          return fetchManifest(cb, new URL(res.headers.location, target).toString(), hops - 1);
+        } catch (e) { return finish(null); }
+      }
       if (res.statusCode !== 200) { res.resume(); return finish(null); }
       let body = '';
       res.setEncoding('utf8');
@@ -584,7 +635,7 @@ if (fs.existsSync(SERVER_ENTRY) && !AUTO_UPDATE) {
   const have = installedVersion();
   installState = { phase: 'checking', detail: 'checking for a newer server', pct: null };
   fetchManifest((m) => {
-    if (!m || m.version === have) {
+    if (!m || !differs(m, have, installedSha())) {
       /*
        * ⚠️ "Same version" and "could not ask" take the SAME branch deliberately: the only safe
        * reading of an unanswerable question is to change nothing.
@@ -596,7 +647,29 @@ if (fs.existsSync(SERVER_ENTRY) && !AUTO_UPDATE) {
     runInstall(m);
   });
 } else {
-  runInstall(null);
+  /*
+   * ⚠️ THE FIRST INSTALL ASKS FOR THE MANIFEST TOO, and it did not — which quietly cost two things.
+   *
+   * Without a manifest there is no checksum, so the very first payload a box ever takes was the one
+   * install that went in UNVERIFIED — the case with the least prior state and therefore the least
+   * ability to notice a truncated download. And because the checksum is what gets recorded, that box
+   * then had nothing to compare against and could not see the NEXT rebuild either: one missing fetch
+   * disabled update detection for the life of the device.
+   *
+   * ⚠️ It still installs when the manifest cannot be fetched. A first install has nothing to fall
+   * back to — refusing would leave a player with no server at all, which is strictly worse than an
+   * unverified one. The log says which happened, because "installed" and "installed without being
+   * able to check it" are different facts.
+   */
+  installState = { phase: 'checking', detail: 'fetching the payload manifest', pct: null };
+  fetchManifest((m) => {
+    if (!m) {
+      remember('log', ['no manifest at ' + MANIFEST_URL +
+                       ' — installing without a checksum to verify against']);
+      unverifiedInstall = true;
+    }
+    runInstall(m);
+  });
 }
 
 /*

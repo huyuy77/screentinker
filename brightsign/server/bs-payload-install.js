@@ -244,6 +244,24 @@ async function install(opts) {
   const say = (phase, detail, pct) => { if (onState) onState({ phase, detail, pct }); };
 
   const zipPath = path.join(installDir, 'server-payload.zip');
+  let installedDigest = null;
+
+  /*
+   * ⚠️ AN INSTALL LOG ON DISK, because the live one is unreachable where it matters. The status
+   * listener binds to localhost only (#291, deliberately — it should not answer the LAN), so on a
+   * real player the only account of what happened during an install is inside a process nobody can
+   * query. Diagnosing a failed update then means guessing, which is exactly where this landed.
+   *
+   * A file the device's own web server can serve turns that into evidence. Small, overwritten each
+   * run, and best-effort: a diagnostic that could itself break an install would be worse than none.
+   */
+  const logPath = path.join(installDir, '.payload-install.log');
+  const lines = [];
+  const note = (msg) => {
+    lines.push(new Date().toISOString() + '  ' + msg);
+    try { fs.writeFileSync(logPath, lines.join('\n') + '\n'); } catch (e) { /* never fatal */ }
+  };
+  note('install starting from ' + url + (expectSha256 ? ' (checksum supplied)' : ' (NO checksum supplied)'));
   const staging = path.join(installDir, '.payload-staging');
   const entry = path.join(installDir, 'server', 'server.js');
 
@@ -254,6 +272,29 @@ async function install(opts) {
         total ? `${mb(got)}MB of ${mb(total)}MB` : `${mb(got)}MB`,
         total ? Math.round((got / total) * 100) : null);
   });
+
+  /*
+   * ⚠️ THE DIGEST IS COMPUTED FOR EVERY INSTALL, verified when there is something to verify against,
+   * and RECORDED either way.
+   *
+   * Two jobs, and tying the second to the first is what broke it: an install with no manifest
+   * recorded nothing, so the next boot had nothing to compare against and could never detect a
+   * rebuild — one missing fetch disabling update detection for the life of the device.
+   *
+   * ⚠️ AND VERIFYING BEFORE EXTRACTING IS THE POINT. "It unpacked" is not "it is what we published":
+   * a truncated download is a valid zip far more often than people expect, and this project has
+   * already seen truncated APKs in the field. A partial payload that extracted cleanly would
+   * otherwise be swapped in over a working server.
+   */
+  installedDigest = crypto.createHash('sha256').update(fs.readFileSync(zipPath)).digest('hex');
+  note('downloaded ' + bytes + ' bytes, sha256=' + installedDigest);
+
+  if (expectSha256 && installedDigest !== expectSha256) {
+    note('CHECKSUM MISMATCH: expected ' + expectSha256 + ' — refusing to install');
+    throw new Error('payload checksum mismatch: expected ' + expectSha256.slice(0, 12) +
+                    '… got ' + installedDigest.slice(0, 12) + '… — refusing to install');
+  }
+  if (expectSha256) note('checksum verified against the published manifest');
 
   say('extracting', `${Math.round(bytes / 1048576)}MB downloaded`, 0);
   fs.rmSync(staging, { recursive: true, force: true });
@@ -324,6 +365,24 @@ async function install(opts) {
     }
   }
 
+  /*
+   * ⚠️ RECORD WHAT WAS INSTALLED, BY CHECKSUM. Comparing version strings alone cannot see a rebuild:
+   * every alpha build is "2.0.0-alpha0", so a box would decide it was current and never take a fix.
+   * The manifest already carries a sha256 of the exact bytes, so storing it makes "is this the
+   * payload I am running?" answerable rather than inferred from a label that does not change.
+   */
+  if (installedDigest) {
+    try {
+      fs.writeFileSync(path.join(installDir, '.payload-sha256'), installedDigest);
+      note('recorded .payload-sha256=' + installedDigest);
+    } catch (e) {
+      note('could NOT record .payload-sha256: ' + (e && e.message));
+    }
+  } else {
+    note('no digest computed — nothing recorded, so the next boot cannot detect a rebuild');
+  }
+
+  note('installed ' + result.files + ' files');
   say('installed', `${result.files} files`, 100);
   return result;
 }
