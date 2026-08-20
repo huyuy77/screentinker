@@ -253,7 +253,7 @@ test('every existing install becomes a node with zero edges (migration is a no-o
     assert.deepEqual(tables, [
       'mesh_client_access', 'mesh_clients', 'mesh_edges',
       'mesh_mirror_alerts', 'mesh_mirror_devices', 'mesh_mirror_nodes', 'mesh_mirror_play_logs',
-      'mesh_node', 'mesh_tombstones',
+      'mesh_node', 'mesh_pairing_codes', 'mesh_tombstones',
     ]);
 
     // Still empty on a fresh install: tables exist, nothing is mirrored until something is paired.
@@ -301,7 +301,7 @@ test('test_mesh_off_by_default (I1)', () => {
   assert.equal(cfg.a, false, 'MESH_ACCEPT_ENROLLMENT must default OFF');
   assert.equal(cfg.u, false, 'MESH_ALLOW_UPLINK must default OFF');
   assert.equal(cfg.d, 2, 'depth stays capped at 2 until Phase 4');
-  assert.equal(cfg.v, '2.0.0', 'the version floor must be stated, not absent');
+  assert.equal(cfg.v, '2.0.0-0', 'the version floor must be stated, not absent');
 });
 
 test('a capability requiring enrollment is refused while the flag is off (I1)', () => {
@@ -320,7 +320,7 @@ test('a node below the version floor is refused with a readable reason', () => {
   // ⚠️ An unparseable version is refused, not waved through: a peer that cannot state its version
   // cannot be held to a contract, and "unknown" is what a broken or hostile peer reports.
   assert.equal(identity.versionAcceptable('garbage'), false);
-  assert.match(identity.versionRefusalReason('1.9.39'), /requires 2\.0\.0 or newer/);
+  assert.match(identity.versionRefusalReason('1.9.39'), /requires 2\.0\.0-0 or newer/);
   assert.match(identity.versionRefusalReason('garbage'), /not a version this node can compare/);
 });
 

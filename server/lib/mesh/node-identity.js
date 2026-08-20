@@ -39,7 +39,17 @@ const { cmp } = require('../ota-breaker');
  * that writes into someone else's database, and standing it up takes five minutes — "reasonably
  * current" is a fair ask of a node and an unfair one of a panel.
  */
-const MIN_NODE_VERSION = '2.0.0';
+/*
+ * ⚠️ `2.0.0-0`, NOT `2.0.0`. A prerelease sorts BELOW its own release in semver, so a floor of
+ * "2.0.0" refuses 2.0.0-alpha0 — every pre-release node would refuse to pair with every other
+ * pre-release node, including one running byte-identical code. `-0` is the canonical idiom for
+ * "the lowest possible 2.0.0 prerelease", so it admits the alphas and still refuses 1.9.x.
+ *
+ * This is the same trap that reverts hand-delivered test builds over OTA. It is worth stating twice
+ * because it presents completely differently each time: there it silently downgrades a tester, here
+ * it refuses a connection with a message that looks like a genuine version mismatch.
+ */
+const MIN_NODE_VERSION = '2.0.0-0';
 
 /** How long a node may lag the floor before an operator is warned rather than refused. */
 const DEPRECATION_WINDOW_NOTE =

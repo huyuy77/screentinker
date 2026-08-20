@@ -117,10 +117,31 @@ test('acting on something remote is a link to where it lives', () => {
   assert.match(VIEW, /target="_blank" rel="noopener"/, 'and it opens away from the hub safely');
 });
 
-test('the view writes nothing (I2)', () => {
-  // No POST/PUT/PATCH/DELETE from a screen that observes other people's machines.
-  for (const verb of ['api.post', 'api.put', 'api.patch', 'api.delete']) {
-    assert.ok(!VIEW.includes(verb), `${verb} in a read-only view`);
+test('⚠️ the view never writes to anything REMOTE (I2)', () => {
+  /*
+   * ⚠️ REFINED, NOT RELAXED, when enrollment landed. I2 is "there is no downward channel to write
+   * over" — the hub cannot change what plays on somebody else's screens. It was expressed as "this
+   * file contains no api.post at all", which was true and became wrong for the wrong reason:
+   * generating a pairing code and connecting this server to a parent are writes to THIS node's own
+   * configuration, performed by its own instance owner. Banning the verb outright would push that
+   * administration onto some other screen without making anything safer.
+   *
+   * So the guard is now about the TARGET. Every write must address a local administration endpoint;
+   * nothing may write to a mirrored collection.
+   */
+  const LOCAL_WRITE_PATHS = ['/mesh/pair/code', '/mesh/uplink'];
+  const writes = [...VIEW.matchAll(/api\.(post|put|patch|delete)\(\s*[`'"]([^`'"$]*)/g)]
+    .map((m) => ({ verb: m[1], path: m[2] }));
+  assert.ok(writes.length > 0, 'the enrollment tab does write something');
+  for (const w of writes) {
+    assert.ok(LOCAL_WRITE_PATHS.some((p) => w.path.startsWith(p)),
+      `api.${w.verb} to "${w.path}" — a write outside local administration`);
+  }
+  for (const remote of ['/mesh/nodes', '/mesh/devices', '/mesh/alerts', '/mesh/uptime', '/mesh/topology']) {
+    for (const verb of ['post', 'put', 'patch', 'delete']) {
+      assert.ok(!new RegExp(`api\\.${verb}\\(\\s*[\`'"]${remote}`).test(VIEW),
+        `${verb} to ${remote} — mirrored data is read-only`);
+    }
   }
 });
 
@@ -216,11 +237,9 @@ test('a truncated incident list says so', () => {
   assert.match(VIEW, /CSV export contains every one/);
 });
 
-test('the view still writes nothing, across all four tabs (I2)', () => {
-  for (const verb of ['api.post', 'api.put', 'api.patch', 'api.delete']) {
-    assert.ok(!VIEW.includes(verb), `${verb} in a read-only view`);
-  }
-  // ⚠️ Including the raw fetch added for the CSV download — a GET, and it must stay one.
+test('the one raw fetch stays a GET', () => {
+  // ⚠️ The CSV download bypasses api.js to attach the auth header itself, so it is the one call the
+  // target check above cannot see. It must remain a read.
   const fetches = [...VIEW.matchAll(/fetch\(([^)]*)\)/g)];
   assert.ok(fetches.length <= 1, 'exactly one raw fetch, for the export');
   assert.doesNotMatch(VIEW, /method: '(POST|PUT|PATCH|DELETE)'/);

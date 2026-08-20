@@ -730,6 +730,43 @@ const migrations = [
      UNIQUE (peer_node_id, direction)
    )`,
 
+  /* ⚠️ The peer's own base URL. hub-view.js#deepLink() has read `edge.peer_url` since Phase 3 and the
+   * column did not exist — so every "Open on its server" link silently rendered as a dash, which is
+   * precisely the affordance the directive names as what keeps a read-only hub useful. The tests
+   * passed because their fixtures declared the column; only the real schema lacked it. On a `down`
+   * edge it is where the child says it can be reached; on an `up` edge it is the address we dial. */
+  'ALTER TABLE mesh_edges ADD COLUMN peer_url TEXT',
+
+  /* ⚠️ The child's OWN edge token, in plaintext, and ONLY ever on an `up` edge. A parent stores a
+   * hash because it only verifies; a child must actually PRESENT the token on every dial, so it has
+   * no choice but to keep the secret. Kept in its own column rather than reusing token_hash so that
+   * "this column is a hash" stays true everywhere else — a column that is sometimes a secret and
+   * sometimes a digest is how one gets logged. */
+  'ALTER TABLE mesh_edges ADD COLUMN up_token TEXT',
+
+  /* Pairing codes — short-lived, single-use, burned on redemption.
+   *
+   * ⚠️ A ROW PER CODE WITH AN EXPLICIT burned_at, not a delete. A redeemed code that vanishes cannot
+   * answer "was this used, or never generated?" when an operator says pairing failed, and the two
+   * have opposite fixes. The row is the audit trail for a security-relevant event. */
+  `CREATE TABLE IF NOT EXISTS mesh_pairing_codes (
+     id            TEXT PRIMARY KEY,
+     code          TEXT NOT NULL,
+     -- What this code will grant when redeemed. ⚠️ Chosen at MINT time, by the operator who is
+     -- already authenticated here — never by the party redeeming it. A code that let the redeemer
+     -- pick its own grant would be a self-service permission escalation.
+     role_capabilities TEXT NOT NULL DEFAULT '[]',
+     grant_categories  TEXT NOT NULL DEFAULT '[]',
+     client_id     TEXT,
+     retention_days INTEGER,
+     created_by    TEXT,
+     created_at    INTEGER NOT NULL,
+     expires_at    INTEGER NOT NULL,
+     burned_at     INTEGER,
+     burned_by_node TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_mesh_code ON mesh_pairing_codes (code)`,
+
   /* Clients — the grouping primitive ABOVE node.
    *
    * ⚠️ NOT A WORKSPACE. The six existing roles are workspace-scoped, and an MSP tech needing to see

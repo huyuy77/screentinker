@@ -973,6 +973,41 @@ if (require('./config').meshAcceptEnrollment) {
     console.warn(`[mesh] hub API not mounted: ${e && e.message}`);
   }
 }
+
+/*
+ * Enrollment. ⚠️ Mounted when EITHER flag is on, because the two halves live here: minting a code is
+ * a hub action, enrolling upward is a child action, and a node may be one, the other, or both.
+ *
+ * ⚠️ The consent-from-below routes inside are deliberately reachable even when both flags are off,
+ * so a node that already HAS a parent can always show its operator that it does and sever it. The
+ * one configuration where an MSP link must not become invisible is the one where somebody turned
+ * the flag off after making it.
+ */
+{
+  const meshCfg = require('./config');
+  if (meshCfg.meshAcceptEnrollment || meshCfg.meshAllowUplink || hasUpEdges()) {
+    try {
+      app.use('/api/mesh', require('./routes/mesh-enroll')(require('./db/database').db, {
+        requireAuth,
+        config: meshCfg,
+        onUplinkChanged: () => { try { meshUplinks && meshUplinks.refresh(); } catch (e) { /* best effort */ } },
+      }));
+      console.log('[mesh] enrollment routes mounted');
+    } catch (e) {
+      console.warn(`[mesh] enrollment routes not mounted: ${e && e.message}`);
+    }
+  }
+}
+
+function hasUpEdges() {
+  try {
+    return !!require('./db/database').db
+      .prepare("SELECT 1 FROM mesh_edges WHERE direction = 'up' LIMIT 1").get();
+  } catch (e) {
+    return false;
+  }
+}
+let meshUplinks = null;
 const { sixDigitCode } = require('./lib/numeric-code');
 const { resolveTenancy, accessContext } = require('./lib/tenancy');
 // Public API token front door (Phase 1). Attached ONLY to the public routers below.
@@ -1318,6 +1353,18 @@ startAlertService(io);
  * and changes no behaviour. It is deliberately NOT flag-gated, because unlike the mesh this is an
  * ordinary product feature that happens to have no rules yet.
  */
+/*
+ * The child half of the mesh: open an uplink per `up` edge and report on a fixed cadence. Gated on
+ * MESH_ALLOW_UPLINK, wrapped, and its timer is unref'd — an observer relationship must never be the
+ * reason this node fails to boot or refuses to exit (I1).
+ */
+try {
+  const { startMeshUplinks } = require('./services/mesh-uplink');
+  meshUplinks = startMeshUplinks(require('./db/database').db, { config: require('./config') });
+} catch (e) {
+  console.warn(`[mesh] uplinks not started: ${e && e.message}`);
+}
+
 const { startThresholdAlerts } = require('./services/threshold-alerts');
 // ⚠️ Required HERE rather than using a `db` from an outer scope — there isn't one at this point in
 // the file. A free reference would have thrown at boot, which is the same shape as the TDZ crash

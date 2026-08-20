@@ -41,6 +41,9 @@ async function parent({ edgeOver = {}, onEnvelope = () => {} } = {}) {
     thisNodeId: HUB_ID,
     acceptEnrollment: () => true,
     findEdgeByTokenHash: (h) => (h === tokenHash ? edge : null),
+    // The same mutable row, so a test can revoke or expire it MID-SESSION and see the open socket
+    // react — which is the whole point of re-reading it per envelope.
+    reloadEdge: (id) => (id === edge.id ? edge : null),
     onEnvelope: (e, env, meta) => { received.push({ env, meta }); onEnvelope(e, env, meta); },
     logger: quietLogger,
   });
@@ -354,4 +357,97 @@ test('⚠️ END TO END: a denied field never crosses the wire', async () => {
       assert.ok(!wire.includes(secret), `"${secret}" appeared in the frame sent to the parent`);
     }
   } finally { up.stop(); await hub.close(); }
+});
+
+// ===== authorisation is not a handshake-only decision =====
+
+test('⚠️ REVOKING AN EDGE STOPS A SOCKET THAT IS ALREADY OPEN', async () => {
+  /*
+   * A mesh socket is long-lived by design: a child dials its parent and stays. So an edge captured
+   * at handshake means revocation does nothing until the child happens to reconnect — which may be
+   * days. An operator revokes precisely when they have decided a peer should stop being trusted, and
+   * "it takes effect at the next reconnect" is not a revoke.
+   */
+  const hub = await parent();
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.connected);
+    const mk = () => envelope.createEnvelope({
+      originNodeId: CHILD_ID, type: 'node-health', bodyVersion: 1,
+      ancestry: [CHILD_ID], originTs: Date.now(), body: { ok: true },
+    });
+    up.send(mk());
+    await waitFor(() => hub.received.length === 1);
+
+    // Revoked while the connection is up.
+    hub.edge.revoked_at = Math.floor(Date.now() / 1000);
+
+    up.send(mk());
+    await waitFor(() => !up.connected, 4000);
+    assert.equal(hub.received.length, 1, 'nothing was accepted after the revoke');
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('⚠️ AN EXPIRED TOKEN IS ACTUALLY CHECKED — the column has to be SELECTed', async () => {
+  /*
+   * The real bug this guards: store.findEdgeByTokenHash did not select token_expires_at, so
+   * edgeIsActive() saw `undefined`, its `typeof … === 'number'` gate skipped, and an expired edge
+   * token authenticated forever. Every unit test passed because they build edge objects by hand
+   * with the field present — only the production query omitted it.
+   */
+  const hub = await parent({ edgeOver: { token_expires_at: Math.floor(Date.now() / 1000) - 60 } });
+  const up = child(hub).start();
+  try {
+    await waitFor(() => up.lastError, 4000);
+    assert.match(up.lastError, /expired/i, 'and the child is told which of the two it was');
+    assert.equal(up.connected, false);
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('the real store query loads every field edgeIsActive gates on', () => {
+  /*
+   * Read from the SOURCE rather than a hand-built row: the failure mode was a field the checker
+   * reads and the query never returned, which no amount of testing edgeIsActive itself can catch.
+   */
+  const fs = require('node:fs');
+  const src = fs.readFileSync(require.resolve('../lib/mesh/store.js'), 'utf8');
+  const active = fs.readFileSync(require.resolve('../lib/mesh/pairing.js'), 'utf8')
+    .match(/function edgeIsActive[\s\S]*?\n}/)[0];
+  for (const field of ['revoked_at', 'token_expires_at']) {
+    assert.ok(active.includes(field), `edgeIsActive should gate on ${field}`);
+    for (const fn of ['findEdgeByTokenHash', 'reloadEdge']) {
+      const body = src.match(new RegExp(`function ${fn}[\\s\\S]*?\\n}`))[0];
+      assert.ok(body.includes(field), `${fn} must SELECT ${field} — it is gated on`);
+    }
+  }
+});
+
+// ===== the uplink buffer =====
+
+test('⚠️ send() reports THIS envelope, not a running total', () => {
+  /*
+   * It used to `return this.dropped === 0`, so one drop at any point latched the return to false
+   * forever and a caller counting on it reported loss on every later send that buffered fine.
+   */
+  const up = new Uplink({ parentUrl: 'http://x', edgeToken: 't', nodeId: 'n',
+                          connect: () => ({ on() {}, close() {} }), bufferMax: 2, logger: quietLogger });
+  assert.equal(up.send({ a: 1 }), true);
+  assert.equal(up.send({ a: 2 }), true);
+  assert.equal(up.send({ a: 3 }), false, 'this one evicted the oldest');
+  assert.equal(up.buffer.length, 2, 'and the buffer stayed at its limit');
+  assert.equal(up.dropped, 1);
+});
+
+test('⚠️ the RE-BUFFER path is bounded too', () => {
+  /*
+   * A parent that accepts connections but times out every emit sends everything back through
+   * _requeue. Pushing directly there grew the buffer past its own limit — the exact condition the
+   * limit exists for, since an observer's outage must never become the observed node's outage (I1).
+   */
+  const up = new Uplink({ parentUrl: 'http://x', edgeToken: 't', nodeId: 'n',
+                          connect: () => ({ on() {}, close() {} }), bufferMax: 3, logger: quietLogger });
+  for (let i = 0; i < 3; i++) up.send({ i });
+  for (let i = 0; i < 100; i++) up._requeue({ requeued: i });
+  assert.equal(up.buffer.length, 3, 'never grows past the limit however many come back');
+  assert.equal(up.dropped, 100, 'and the loss is counted rather than hidden');
 });

@@ -49,7 +49,13 @@ function findEdgeByTokenHash(db, tokenHash) {
     const row = db.prepare(`
       SELECT id, peer_node_id, direction, role_capabilities, grant_categories,
              transport_direction, retention_days, tombstone_purge_days, tls_verify,
-             peer_version, client_id, created_at, last_sync_at, revoked_at
+             peer_version, client_id, created_at, last_sync_at, revoked_at,
+             -- ⚠️ token_expires_at MUST be selected, and its absence here was a silent auth bug.
+             -- edgeIsActive() gates on it being a number, so a row loaded without the column reads
+             -- undefined, the gate skips, and an expired edge token authenticated forever. The unit
+             -- tests passed because they build edge objects by hand with the field present; only
+             -- the real query omitted it. Anything gated on a field must load that field.
+             token_expires_at
         FROM mesh_edges
        WHERE token_hash = ? AND direction = 'down'
     `).get(tokenHash);
@@ -57,6 +63,35 @@ function findEdgeByTokenHash(db, tokenHash) {
     return {
       ...row,
       // Stored as JSON text; callers expect arrays and must not each re-parse.
+      role_capabilities: safeParseArray(row.role_capabilities),
+      grant_categories: safeParseArray(row.grant_categories),
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Re-read one edge by id, for revalidating a connection that is already open.
+ *
+ * ⚠️ AUTHORISATION HAS TO BE RE-CHECKED, NOT SNAPSHOTTED AT HANDSHAKE. A mesh socket is long-lived by
+ * design — a child dials its parent and stays — so an edge captured at connect time means revocation
+ * and token expiry do nothing until the child happens to reconnect, which may be days. "Revoke"
+ * that leaves the data flowing is not a revoke, and it is the control an operator reaches for
+ * precisely when they have decided a peer should no longer be trusted.
+ */
+function reloadEdge(db, edgeId) {
+  if (!edgeId) return null;
+  try {
+    const row = db.prepare(`
+      SELECT id, peer_node_id, direction, role_capabilities, grant_categories,
+             transport_direction, retention_days, tombstone_purge_days, tls_verify,
+             peer_version, client_id, created_at, last_sync_at, revoked_at, token_expires_at
+        FROM mesh_edges WHERE id = ?
+    `).get(edgeId);
+    if (!row) return null;
+    return {
+      ...row,
       role_capabilities: safeParseArray(row.role_capabilities),
       grant_categories: safeParseArray(row.grant_categories),
     };
@@ -99,4 +134,6 @@ function listChildEdges(db) {
   }
 }
 
-module.exports = { ensureNodeIdentity, findEdgeByTokenHash, touchEdge, listChildEdges, safeParseArray };
+module.exports = {
+  ensureNodeIdentity, findEdgeByTokenHash, reloadEdge, touchEdge, listChildEdges, safeParseArray,
+};

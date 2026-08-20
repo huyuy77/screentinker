@@ -207,7 +207,27 @@ explicit purge. A node losing its parent reverts to standalone silently and buff
 it can see, when it last synced, and a revoke button. An MSP link the client cannot see or sever is a
 contract dispute waiting to happen — and visibility is what makes a client comfortable agreeing.
 
-> **Status: complete.** Pairing (`pairing.js`), revocation/disenrollment + consent-from-below
+> **Status: complete** — but it was marked complete once before it was, and that is worth recording.
+>
+> ⚠️ **Every module existed, was tested, and NOTHING CALLED THEM.** No route minted a pairing code,
+> none redeemed one, and no production code ever constructed an `Uplink`. Two servers could not be
+> connected by any means an operator has. Unit tests all passed, because each piece worked in
+> isolation — which is exactly how a phase gets marked done while the feature does not exist. Now:
+> `routes/mesh-enroll.js` (mint / redeem / enrol / sever) and `services/mesh-uplink.js`.
+>
+> Four further defects only an end-to-end run could surface, all of them invisible to the unit tests:
+>
+> 1. **`token_expires_at` was never SELECTed** by the auth query, so `edgeIsActive()` read `undefined`
+>    and the expiry check silently never ran — an expired edge token authenticated forever.
+> 2. **Authorisation was snapshotted at handshake.** Mesh sockets are long-lived by design, so
+>    revoking an edge did nothing until the child happened to reconnect. Re-checked per envelope now.
+> 3. **The pairing code was stored in its display form** and looked up normalised, so every redemption
+>    answered "that code is not valid" about a code minted seconds earlier.
+> 4. **`MESH_MIN_NODE_VERSION` was a dead knob**, and the floor `2.0.0` refuses `2.0.0-alpha0` —
+>    a prerelease sorts below its own release, so every alpha node refused every other alpha node.
+>    The floor is `2.0.0-0`.
+>
+> Original status: Pairing (`pairing.js`), revocation/disenrollment + consent-from-below
 > (`edge-status.js`), per-child backpressure (`backpressure.js`), node identity and edge storage
 > (`store.js`), and **transport** — parent side `ws/meshSocket.js` on its own `/mesh` namespace,
 > child side `uplink.js` dialling out with jittered backoff and a bounded buffer. The topology

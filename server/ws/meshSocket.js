@@ -76,7 +76,10 @@ function setupMeshSocket(io, deps) {
   });
 
   meshNs.on('connection', (socket) => {
-    const edge = socket.data.edge;
+    // ⚠️ `let`, because the edge is re-read per envelope below and the fresh row is what the rest of
+    // the handler must use — a grant narrowed while the socket was open has to take effect on the
+    // NEXT payload, not at the next reconnect.
+    let edge = socket.data.edge;
     const childId = socket.data.childNodeId;
     log.log(`[mesh] node ${childId} connected on edge ${edge.id}`);
 
@@ -88,6 +91,30 @@ function setupMeshSocket(io, deps) {
        * take other connections with it. One bad child must cost exactly one bad child (I6).
        */
       try {
+        /*
+         * ⚠️ AUTHORISATION IS RE-CHECKED HERE, NOT ONLY AT HANDSHAKE. This socket is long-lived by
+         * design — a child dials its parent and stays connected — so an edge captured at connect
+         * time means revoking it does nothing until the child happens to reconnect, which may be
+         * days. An operator revokes precisely when they have decided a peer should stop being
+         * trusted, and "it stops at the next reconnect" is not that.
+         *
+         * One indexed read per envelope, the same order as the write that follows it.
+         */
+        if (deps.reloadEdge) {
+          const current = deps.reloadEdge(edge.id);
+          if (!current || !pairing.edgeIsActive(current, now())) {
+            const reason = pairing.edgeInactiveReason(current, now())
+              || 'This connection is no longer authorised.';
+            if (typeof ack === 'function') ack({ ok: false, reason });
+            // Disconnected, not merely refused: leaving the socket open invites the child to keep
+            // sending into a connection that will never accept anything again.
+            socket.disconnect(true);
+            return;
+          }
+          edge = current;
+          socket.data.edge = current;
+        }
+
         const size = typeof raw === 'string' ? raw.length : JSON.stringify(raw || {}).length;
 
         const admit = backpressure.admit(childId, size, now());

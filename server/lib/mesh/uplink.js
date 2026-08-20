@@ -141,24 +141,49 @@ class Uplink extends EventEmitter {
     if (this._timer.unref) this._timer.unref();
   }
 
-  /** Queue an envelope for the parent. Returns false only if it had to be dropped. */
+  /** Queue an envelope for the parent. Returns false only if THIS call had to drop something. */
   send(env) {
     if (this.connected && Date.now() >= this.throttledUntil) {
       this._emit(env);
       return true;
     }
+    /*
+     * ⚠️ Reports what happened to THIS envelope. It used to `return this.dropped === 0`, a running
+     * total — so one drop at any point in the process's life latched the return value to false
+     * forever, and a caller logging or counting on it would report loss on every subsequent send
+     * that had in fact been buffered fine.
+     */
+    let droppedHere = false;
     if (this.buffer.length >= this.bufferMax) {
       this.buffer.shift();
       this.dropped += 1;
+      droppedHere = true;
     }
     this.buffer.push(env);
-    return this.dropped === 0;
+    return !droppedHere;
+  }
+
+  /**
+   * Put an envelope back after a failed or throttled send.
+   *
+   * ⚠️ BOUNDED, like send(). The re-buffer path used to push directly, so a parent that accepted
+   * connections but timed out every emit would grow the buffer past its own limit — the exact
+   * condition the limit exists for (I1: an observer's outage must not become the observed node's
+   * outage). Newest is dropped here rather than oldest: this envelope has already failed once, and
+   * the older ones in the queue are closer to being delivered.
+   */
+  _requeue(env) {
+    if (this.buffer.length >= this.bufferMax) {
+      this.dropped += 1;
+      return;
+    }
+    this.buffer.push(env);
   }
 
   _emit(env) {
     try {
       this.socket.timeout(15_000).emit('mesh:envelope', env, (err, res) => {
-        if (err) { this.buffer.push(env); return; }
+        if (err) { this._requeue(env); return; }
         if (res && res.throttled) {
           /*
            * ⚠️ Respect the parent's backpressure rather than hammering. The parent already told us
@@ -166,13 +191,13 @@ class Uplink extends EventEmitter {
            * it hardest wins the most bandwidth — the opposite of what the limit is for.
            */
           this.throttledUntil = Date.now() + (res.retryAfterMs || 1000);
-          this.buffer.push(env);
+          this._requeue(env);
           return;
         }
         if (res && res.ok) this.lastSyncAt = Date.now();
       });
     } catch (e) {
-      this.buffer.push(env);
+      this._requeue(env);
     }
   }
 
@@ -180,7 +205,7 @@ class Uplink extends EventEmitter {
     // Oldest first, so the parent sees the gap in the order it happened.
     const pending = this.buffer.splice(0, this.buffer.length);
     for (const env of pending) {
-      if (!this.connected) { this.buffer.push(env); break; }
+      if (!this.connected) { this._requeue(env); break; }
       this._emit(env);
     }
   }

@@ -65,9 +65,10 @@ module.exports = {
   // multi-hop relay, deep clock skew and aggregate fidelity are anything but theory.
   meshMaxDepth: parseInt(process.env.MESH_MAX_DEPTH) || 2,
 
-  // Oldest peer this node will form an edge with. 2.0.0 because no earlier build can speak mesh at
-  // all — see server/lib/mesh/node-identity.js for why a floor has to exist at all.
-  meshMinNodeVersion: process.env.MESH_MIN_NODE_VERSION || '2.0.0',
+  // Oldest peer this node will form an edge with. ⚠️ `2.0.0-0`, not `2.0.0`: a prerelease sorts
+  // BELOW its own release, so the tighter-looking floor refuses every 2.0.0-alpha node — including
+  // one running identical code. See server/lib/mesh/node-identity.js.
+  meshMinNodeVersion: process.env.MESH_MIN_NODE_VERSION || '2.0.0-0',
 
   // App-level heartbeat. Checker runs every heartbeatInterval and marks
   // devices offline if last_heartbeat is older than heartbeatTimeout.

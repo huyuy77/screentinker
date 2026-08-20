@@ -160,8 +160,14 @@ function validateEnrollment({ code, codeRecord, peer, capabilities, grant, deps 
     if (!dup.ok) return { ok: false, reason: dup.reason, duplicate: true };
   }
 
-  if (!mods.identity.versionAcceptable(peer.version)) {
-    return { ok: false, reason: mods.identity.versionRefusalReason(peer.version) };
+  /*
+   * ⚠️ The floor comes from deps, defaulting to the module's own. MESH_MIN_NODE_VERSION was declared
+   * in config.js and asserted in a test, but nothing ever passed it here — so an operator who set it
+   * changed nothing at all, and would have had no way to find that out short of reading this line.
+   */
+  const floor = deps.minNodeVersion || undefined;
+  if (!mods.identity.versionAcceptable(peer.version, floor)) {
+    return { ok: false, reason: mods.identity.versionRefusalReason(peer.version, floor) };
   }
 
   /*

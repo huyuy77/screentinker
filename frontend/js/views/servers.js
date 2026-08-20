@@ -102,6 +102,24 @@ const TABS = [
   ['alerts', 'Alerts'],
   ['topology', 'Topology'],
   ['uptime', 'Uptime report'],
+  ['connect', 'Connect'],
+];
+
+/*
+ * ⚠️ The grant vocabulary is spelled out for a HUMAN, in the order of how much it gives away. An
+ * operator ticking boxes is deciding what another company may see about their customer's premises,
+ * and "health, identity, network-wan" means nothing at the moment of the decision.
+ */
+const GRANTS = [
+  ['health', 'Whether screens are alive and how they are coping', ''],
+  ['identity', 'What each screen is called and what it runs', 'Without this, screens appear as opaque ids and cannot be searched by name.'],
+  ['network-lan', 'Private addresses on the local network', 'Useful for on-site support. Does not identify the site to an outsider.'],
+  ['display', 'What the screen hardware is doing', ''],
+  ['content-metadata', 'What is scheduled to play', ''],
+  ['proof-of-play', 'Evidence that specific content played at specific times', 'Never thinned in transit, so it stays usable as evidence — and costs more bandwidth at depth.'],
+  ['diagnostics', 'Why something went wrong', ''],
+  ['network-wan', 'The public internet address the screens appear from', '⚠️ Locates the premises — a public address is geolocatable to a town or building.'],
+  ['display-capture', 'Actual images of what is on screen', '⚠️ Screenshots may contain whatever was on the screen, including anything private behind it.'],
 ];
 
 export async function render(container) {
@@ -129,6 +147,7 @@ export async function render(container) {
   if (state.tab === 'fleet') return renderFleet(panel);
   if (state.tab === 'alerts') return renderAlerts(panel);
   if (state.tab === 'topology') return renderTopology(panel);
+  if (state.tab === 'connect') return renderConnect(panel);
   return renderUptime(panel);
 }
 
@@ -366,6 +385,117 @@ async function renderTopology(panel) {
         </tbody>
       </table>
     </div>`;
+}
+
+/* ===================== connecting servers ===================== */
+
+async function renderConnect(panel) {
+  let up = { uplinks: [], canEnroll: false, nodeId: '' };
+  try { up = await api.get('/mesh/uplink'); } catch (e) { /* the child half may not be mounted */ }
+
+  panel.innerHTML = `
+    <div class="card">
+      <h3 style="margin-top:0">This server</h3>
+      <p class="muted" style="font-size:12px">Its id in the mesh is
+        <span class="badge">${esc(up.nodeId || 'not assigned yet')}</span>.
+        This id is generated here and registered nowhere — there is no central directory.</p>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin-top:0">Let another server observe this one</h3>
+      <p class="muted" style="font-size:12px">Generate a code, then enter it on the other server
+        along with this one's address. The code can be used once and expires shortly.</p>
+      <!-- ⚠️ The grant is chosen HERE, by the side giving the data — never requested by the side
+           redeeming the code. Otherwise whoever holds a code could ask for everything. -->
+      <div id="grantList" style="margin:12px 0">
+        ${GRANTS.map(([id, summary, warn], i) => `
+          <label style="display:block;margin-bottom:6px;font-size:13px">
+            <input type="checkbox" value="${id}" ${i === 0 ? 'checked' : ''}>
+            <strong>${esc(summary)}</strong>
+            ${warn ? `<div style="margin-left:22px;color:var(--text-muted);font-size:11px">${esc(warn)}</div>` : ''}
+          </label>`).join('')}
+      </div>
+      <button class="btn btn-primary btn-sm" id="mintBtn">Generate a pairing code</button>
+      <div id="mintOut" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin-top:0">Report this server to another one</h3>
+      ${up.canEnroll ? `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="parentUrl" class="input" placeholder="https://hub.example.com" style="max-width:280px">
+          <input id="pairCode" class="input" placeholder="pairing code" style="max-width:180px">
+          <button class="btn btn-secondary btn-sm" id="enrollBtn">Connect</button>
+        </div>
+        <div id="enrollOut" style="margin-top:8px"></div>`
+        : `<p class="muted" style="font-size:12px">This server is not configured to report upward.
+           Set <code>MESH_ALLOW_UPLINK=1</code> and restart it.</p>`}
+
+      <!-- ⚠️ Consent from below: always listed, even when the flag is off, so a link can never be
+           made and then hidden by turning the flag back off. -->
+      <div style="margin-top:16px">
+        ${up.uplinks && up.uplinks.length ? up.uplinks.map((u) => `
+          <div class="card" style="background:var(--bg-subtle,transparent)">
+            <div><strong>Reporting to ${esc(u.parentNodeId || '')}</strong>
+              ${u.revoked ? '<span class="badge">severed</span>' : ''}</div>
+            <div class="muted" style="font-size:12px;margin-top:4px">
+              ${esc(u.parentUrl || '')}<br>
+              Shares: ${esc((u.sharedFields || u.grant || []).join(', ') || 'nothing')}<br>
+              Last synced: ${u.lastSyncAt ? esc(hhmm(Math.floor(u.lastSyncAt / 1000))) : 'never'}
+            </div>
+            ${u.revoked ? '' :
+              `<button class="btn btn-secondary btn-sm" data-sever="${esc(u.edgeId)}"
+                       style="margin-top:8px">Stop reporting</button>`}
+          </div>`).join('')
+          : '<p class="muted" style="font-size:12px">This server does not report to anyone.</p>'}
+      </div>
+    </div>`;
+
+  panel.querySelector('#mintBtn')?.addEventListener('click', async () => {
+    const grant = [...panel.querySelectorAll('#grantList input:checked')].map((c) => c.value);
+    const out = panel.querySelector('#mintOut');
+    try {
+      const r = await api.post('/mesh/pair/code', { grant, capabilities: ['consumes-telemetry'] });
+      out.innerHTML = `
+        <div style="font-size:28px;letter-spacing:4px;font-family:monospace">${esc(r.code)}</div>
+        <div class="muted" style="font-size:12px">
+          Valid until ${esc(hhmm(r.expiresAt))}, once. Give this and this server's address to the
+          other side.<br>It will be allowed to see: ${esc(r.grantDescription || (r.grant || []).join(', '))}
+        </div>`;
+    } catch (e) {
+      out.innerHTML = `<span class="muted">${esc(e.message)}</span>`;
+    }
+  });
+
+  panel.querySelector('#enrollBtn')?.addEventListener('click', async () => {
+    const out = panel.querySelector('#enrollOut');
+    out.textContent = 'Connecting…';
+    try {
+      const r = await api.post('/mesh/uplink', {
+        parentUrl: panel.querySelector('#parentUrl').value,
+        code: panel.querySelector('#pairCode').value,
+        selfUrl: window.location.origin,
+      });
+      out.innerHTML = `<span class="muted">Connected to ${esc(r.parentNodeId)}. It can see:
+        ${esc(r.grantDescription || '')}</span>`;
+      setTimeout(() => renderConnect(panel), 1200);
+    } catch (e) {
+      // ⚠️ The other server's refusal text is shown VERBATIM. It is written to be actionable
+      // ("codes expire and may be used once"), and replacing it with a generic failure would
+      // discard the only explanation the operator is going to get.
+      out.innerHTML = `<span class="muted">${esc(e.message)}</span>`;
+    }
+  });
+
+  panel.querySelectorAll('[data-sever]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        const r = await api.delete(`/mesh/uplink/${encodeURIComponent(btn.dataset.sever)}`);
+        showToast(r.note || 'Stopped reporting.');
+        renderConnect(panel);
+      } catch (e) { showToast(e.message, 'error'); }
+    });
+  });
 }
 
 /* ===================== the uptime report ===================== */

@@ -26,6 +26,23 @@ async function request(url, options = {}) {
 }
 
 export const api = {
+  /*
+   * ⚠️ GENERIC VERBS. Everything else here is a named helper, which is the right shape for a
+   * long-lived endpoint — but the mesh routes are mounted CONDITIONALLY, and a named helper per
+   * route would imply a surface that is usually not there.
+   *
+   * These were missing while views/servers.js already called api.get(), so the whole Servers
+   * section threw "api.get is not a function" on first render and had never worked in a browser.
+   * The tests around it assert on the view's SOURCE, so they confirmed it said the right things
+   * without ever executing it — see test/frontend-api-contract.test.js, which now checks that every
+   * api.X() a view calls actually exists here.
+   */
+  get: (path) => request(path),
+  post: (path, body) => request(path, { method: 'POST', body: JSON.stringify(body ?? {}) }),
+  put: (path, body) => request(path, { method: 'PUT', body: JSON.stringify(body ?? {}) }),
+  patch: (path, body) => request(path, { method: 'PATCH', body: JSON.stringify(body ?? {}) }),
+  delete: (path) => request(path, { method: 'DELETE' }),
+
   // Devices
   getDevices: () => request('/devices'),
   reorderDevices: (order) => request('/devices/reorder', { method: 'POST', body: JSON.stringify({ order }) }),

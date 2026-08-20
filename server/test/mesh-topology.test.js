@@ -155,7 +155,9 @@ test('CASE: version skew — a node below the floor cannot enroll', () => {
   const code = hub.mintCode();
   const r = m.enroll('old', 'hub', { code });
   assert.equal(r.ok, false);
-  assert.match(r.reason, /2\.0\.0 or newer/);
+  // The floor renders as 2.0.0-0 — a prerelease sorts below its own release, so the floor has to
+  // sit below every 2.0.0-alpha for those nodes to pair with each other at all.
+  assert.match(r.reason, /2\.0\.0-0 or newer/);
 });
 
 test('CASE: clock skew — surfaced, never silently reordered', () => {

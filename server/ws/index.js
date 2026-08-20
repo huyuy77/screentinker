@@ -35,6 +35,9 @@ module.exports = function setupWebSockets(io) {
           thisNodeId,
           acceptEnrollment: () => true,
           findEdgeByTokenHash: (hash) => store.findEdgeByTokenHash(db, hash),
+          // Re-read per envelope so revocation and token expiry take effect on a socket that is
+          // already open — see the note in meshSocket.js.
+          reloadEdge: (edgeId) => store.reloadEdge(db, edgeId),
           /*
            * ⚠️ WRAPPED, AND THE EDGE IS TOUCHED FIRST. A storage failure — a disk full, a constraint
            * we did not anticipate from a newer child — must not make the node look unreachable as
