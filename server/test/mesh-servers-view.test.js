@@ -60,8 +60,17 @@ test('⚠️ the nav item is ASKED for, not assumed', () => {
    */
   assert.match(INDEX, /id="serversNavItem" style="display:none"/,
     'it must start hidden, so an ordinary install never flashes a section it does not have');
-  assert.match(APP, /api\.get\('\/mesh\/nodes'\)[\s\S]{0,200}serversNav\.style\.display = ''/,
-    'and be revealed only when the hub API actually answers');
+  /*
+   * ⚠️ EITHER ROLE. Gating on /mesh/nodes alone hid the section on a node configured only to report
+   * UPWARD — and the Connect tab, which is how such a node enrols and how its operator severs the
+   * link, lives inside that section. A child could be configured to join a mesh with no way to do
+   * it, which contradicts consent-from-below: the API answers GET /mesh/uplink whatever the flags
+   * say, precisely so a link cannot be made and then hidden.
+   */
+  assert.match(APP, /api\.get\('\/mesh\/capabilities'\)[\s\S]{0,120}serversNav\.style\.display = ''/,
+    'revealed when this node is part of a mesh in any way');
+  assert.match(APP, /api\.get\('\/mesh\/nodes'\)[\s\S]{0,160}serversNav\.style\.display = ''/,
+    'with the hub route as a fallback for an older peer');
 });
 
 test('⚠️ tables use the HOUSE style, not an invented class', () => {
@@ -448,4 +457,24 @@ test('every readable path names the grant it needs', () => {
   for (const [, pat, rest] of rules) {
     assert.match(rest, /grant:/, `${pat} must declare a grant`);
   }
+});
+
+test('⚠️ a view NEVER re-renders itself into document.body', () => {
+  /*
+   * After enrolling, this view re-rendered by looking its container up with
+   * `closest('#viewContainer')` — an id that exists nowhere in the app; the real one is `#app`. The
+   * lookup returned null, a `|| document.body` fallback took over, and render() replaced the ENTIRE
+   * page — sidebar, banners and all — with this section. It read as a half-broken reload and only a
+   * hard refresh recovered it.
+   *
+   * ⚠️ The fallback is the part worth guarding against, not the typo. A fallback that "works" by
+   * targeting something enormous converts a wrong selector into a plausible-looking screen instead
+   * of an error somebody would notice immediately.
+   */
+  const src = code(VIEW);
+  assert.doesNotMatch(src, /render\([^)]*document\.body/, 'never render into the whole page');
+  assert.doesNotMatch(src, /viewContainer/, 'and not via an id this app does not have');
+  assert.match(src, /state\._container = container/, 'the container handed in is remembered');
+  assert.match(src, /if \(state\._container\) render\(state\._container\)/,
+    'and re-renders address it explicitly');
 });

@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 /*
  * Fetch and unpack the server payload, on the player, in pure JavaScript.
  *
@@ -238,7 +240,7 @@ async function unzip(zipPath, destDir, onProgress) {
  * every subsequent boot would then skip the install and fail somewhere deep in a missing module.
  */
 async function install(opts) {
-  const { url, installDir, onState } = opts;
+  const { url, installDir, onState, expectSha256 } = opts;
   const say = (phase, detail, pct) => { if (onState) onState({ phase, detail, pct }); };
 
   const zipPath = path.join(installDir, 'server-payload.zip');

@@ -390,3 +390,23 @@ if [ -n "$COMPRESSED" ]; then
   exit 1
 fi
 echo "  root-level layout verified, all members stored"
+
+# ⚠️ A MANIFEST BESIDE THE PAYLOAD, GENERATED FROM THE BYTES JUST BUILT.
+#
+# The launcher has to answer "is there a newer server than the one installed?" without downloading
+# 80MB to find out, so it reads this instead. Emitted here rather than written by hand because a
+# manifest that can drift from its archive is worse than none: it is the classic OTA-loop condition
+# — advertise one version, serve another, and every boot re-installs the same payload forever.
+#
+# The checksum is what makes the update safe to apply. A truncated download is a perfectly valid zip
+# far more often than people expect, and "it unpacked" is not the same as "it is what we published".
+if [ "$PAYLOAD_ONLY" = 1 ]; then
+  MANIFEST="${OUT%.zip}.json"
+  printf '{\n  "version": "%s",\n  "sha256": "%s",\n  "size": %s,\n  "built": "%s"\n}\n' \
+    "$(cat VERSION)" \
+    "$(sha256sum "$OUT" | cut -d" " -f1)" \
+    "$(stat -c%s "$OUT")" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MANIFEST"
+  echo "  wrote $MANIFEST"
+  sed 's/^/    /' "$MANIFEST"
+fi

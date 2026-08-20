@@ -662,9 +662,27 @@ function updateSidebarUser() {
    */
   const serversNav = document.getElementById('serversNavItem');
   if (serversNav) {
-    api.get('/mesh/nodes')
+    /*
+     * ⚠️ EITHER ROLE REVEALS IT, and gating on the hub role alone was a real bug.
+     *
+     * /mesh/nodes exists only when MESH_ACCEPT_ENROLLMENT is set — the HUB half. A node configured
+     * only to report UPWARD has no such route, so the section stayed hidden — and the Connect tab,
+     * which is how that node enrols and how its operator later severs the link, lives inside the
+     * section. A child could be configured to join a mesh and then had no way to do it, or to see
+     * that it had.
+     *
+     * That directly contradicts consent-from-below, which the API already honours: GET /mesh/uplink
+     * answers whatever the flags say, precisely so a link can never be made and then hidden. The nav
+     * gate defeated it one layer up.
+     *
+     * /mesh/capabilities is mounted when EITHER flag is on, or when an uplink already exists, so it
+     * is the honest question to ask: "is this node part of a mesh in any way?"
+     */
+    api.get('/mesh/capabilities')
       .then(() => { serversNav.style.display = ''; })
-      .catch(() => { serversNav.style.display = 'none'; });
+      .catch(() => api.get('/mesh/nodes')
+        .then(() => { serversNav.style.display = ''; })
+        .catch(() => { serversNav.style.display = 'none'; }));
   }
 
   let userEl = document.getElementById('sidebarUser');

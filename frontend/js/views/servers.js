@@ -143,6 +143,17 @@ const TABS = [
 
 export async function render(container) {
   /*
+   * ⚠️ REMEMBERED, NOT REDISCOVERED. Re-rendering after enrolling used to look the container up with
+   * `panel.closest('#viewContainer')` — an id that does not exist anywhere in this app; the real one
+   * is `#app`. closest() returned null, the `|| document.body` fallback took over, and render()
+   * replaced the ENTIRE PAGE with this view: sidebar, banners and all. It looked like the app had
+   * half-reloaded, and only a hard refresh put it back.
+   *
+   * A fallback that "works" by targeting something enormous is worse than no fallback: it turns a
+   * wrong selector into a plausible-looking screen instead of an error anybody would notice.
+   */
+  state._container = container;
+  /*
    * ⚠️ TWO DIFFERENT ACTIONS THAT WERE WRONGLY ONE TAB.
    *
    * Handing out a pairing code (this server accepting an observer) and reporting upward (this
@@ -536,7 +547,8 @@ async function renderConnect(panel, caps) {
       });
       out.innerHTML = `<span style="color:var(--text-muted)">Connected to
         <strong>${esc(r.parentName || r.parentNodeId)}</strong>.</span>`;
-      setTimeout(() => render(panel.closest('#viewContainer') || document.body), 1200);
+      // Re-render the SECTION, into the container we were handed.
+      setTimeout(() => { if (state._container) render(state._container); }, 1200);
     } catch (e) {
       // ⚠️ The other server's refusal text is shown VERBATIM. It is written to be actionable
       // ("codes expire and may be used once"), and replacing it with a generic failure would

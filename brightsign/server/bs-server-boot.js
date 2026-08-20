@@ -456,20 +456,74 @@ function startServer() {
   }
 }
 
-if (fs.existsSync(SERVER_ENTRY)) {
-  installState = { phase: 'installed', detail: 'already present', pct: 100 };
-  startServer();
-} else {
-  /*
-   * Where the payload comes from. Configurable because a self-hosted install will not be fetching
-   * from ours — this is the one address the device cannot discover for itself, since the page is
-   * loaded from a file:// URL and the launcher has no environment to pass it through.
-   */
-  const payloadUrl = process.env.ST_PAYLOAD_URL
-    || 'https://alpha.screentinker.com/scripts/server-payload.zip';
+/*
+ * ⚠️ WHERE THE PAYLOAD COMES FROM IS CONFIGURABLE, and it has to be. The default points at alpha,
+ * which is right for our own boxes and wrong for everyone else: a self-hosted site should not reach
+ * across the internet to us to update the server on their own hardware. st-config.json sits on the
+ * storage root beside the flag that already decides whether this device hosts a server, so it is a
+ * file the operator is already editing.
+ */
+function stConfig() {
+  for (const dir of [__dirname, path.dirname(__dirname)]) {
+    try {
+      const f = path.join(dir, 'st-config.json');
+      if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8')) || {};
+    } catch (e) { /* a malformed config must never stop a boot */ }
+  }
+  return {};
+}
 
+const ST_CFG = stConfig();
+const PAYLOAD_URL = process.env.ST_PAYLOAD_URL || ST_CFG.payloadUrl
+  || 'https://alpha.screentinker.com/scripts/server-payload.zip';
+const MANIFEST_URL = String(PAYLOAD_URL).replace(/\.zip$/, '.json');
+// Set "autoUpdate": false to pin a box to what it has. Absent means updates are on.
+const AUTO_UPDATE = ST_CFG.autoUpdate !== false && ST_CFG.autoUpdate !== 0;
+
+function installedVersion() {
+  try { return fs.readFileSync(path.join(__dirname, 'VERSION'), 'utf8').trim(); }
+  catch (e) { return null; }
+}
+
+/**
+ * Is a different payload published?
+ *
+ * ⚠️ ASKS A MANIFEST, NEVER THE ARCHIVE. Downloading 80MB to read a version number would make every
+ * boot cost the whole payload — a check has to be cheaper than the thing it avoids.
+ *
+ * ⚠️ AND IT FAILS SAFE. No network, a malformed manifest, a captive portal answering with HTML —
+ * each returns null and the installed server starts. A box that will not boot because it could not
+ * reach an update server is a far worse outcome than one running last month's build, and it is the
+ * failure an operator cannot fix remotely.
+ */
+function fetchManifest(cb) {
+  let done = false;
+  const finish = (v) => { if (!done) { done = true; cb(v); } };
+  try {
+    const mod = MANIFEST_URL.indexOf('https:') === 0 ? require('https') : require('http');
+    const req = mod.get(MANIFEST_URL, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return finish(null); }
+      let body = '';
+      res.setEncoding('utf8');
+      // Bounded: a manifest is a few hundred bytes and anything larger is not one.
+      res.on('data', (c) => { body += c; if (body.length > 8192) { req.destroy(); finish(null); } });
+      res.on('end', () => {
+        try {
+          const m = JSON.parse(body);
+          finish(m && typeof m.version === 'string' ? m : null);
+        } catch (e) { finish(null); }
+      });
+    });
+    req.setTimeout(10000, () => { req.destroy(); finish(null); });
+    req.on('error', () => finish(null));
+  } catch (e) { finish(null); }
+}
+
+function runInstall(manifest) {
+  const payloadUrl = PAYLOAD_URL;
   installState = { phase: 'starting', detail: payloadUrl, pct: null };
-  remember('log', ['server payload not installed — fetching ' + payloadUrl]);
+  remember('log', [(manifest ? 'updating to ' + manifest.version : 'server payload not installed') +
+                   ' — fetching ' + payloadUrl]);
 
   let installer;
   try {
@@ -477,39 +531,72 @@ if (fs.existsSync(SERVER_ENTRY)) {
   } catch (e) {
     fatalMessage = 'installer missing: ' + String(e && e.message ? e.message : e);
     remember('error', [fatalMessage]);
+    return;
   }
 
-  if (installer) {
-    installer.install({
-      url: payloadUrl,
-      installDir: __dirname,
-      onState: (st) => {
-        installState = st;
-        /*
-         * One line per PHASE CHANGE or per quarter of progress - not per tick.
-         *
-         * The first version logged when pct was 0, 100 or null, which reads as "the interesting
-         * moments" and is not: a download fires its progress callback on every chunk, so once it
-         * reached 100% it logged on every one of them. The 200-entry ring filled with dozens of
-         * copies of "downloading: 73MB of 73MB" and pushed out everything worth reading.
-         */
-        const bucket = st.pct === null || st.pct === undefined ? 'x' : Math.floor(st.pct / 25);
-        const key = st.phase + ':' + bucket;
-        if (key !== lastLoggedInstall) {
-          lastLoggedInstall = key;
-          remember('log', [st.phase + ': ' + st.detail]);
-        }
-      },
-    }).then((r) => {
-      remember('log', ['payload installed (' + r.files + ' files) — starting the server']);
-      startServer();
-    }).catch((e) => {
-      installState = { phase: 'failed', detail: String(e && e.message ? e.message : e), pct: null };
-      fatalMessage = 'could not install the server payload: ' + installState.detail;
-      remember('error', [fatalMessage]);
-      post({ type: 'st-server-fatal', message: fatalMessage });
-    });
-  }
+  installer.install({
+    url: payloadUrl,
+    installDir: __dirname,
+    // Present only when a manifest was read; the installer treats absence as "cannot verify".
+    expectSha256: manifest && typeof manifest.sha256 === 'string' ? manifest.sha256 : null,
+    onState: (st) => {
+      installState = st;
+      /*
+       * One line per PHASE CHANGE or per quarter of progress - not per tick.
+       *
+       * The first version logged when pct was 0, 100 or null, which reads as "the interesting
+       * moments" and is not: a download fires its progress callback on every chunk, so once it
+       * reached 100% it logged on every one of them. The 200-entry ring filled with dozens of
+       * copies of "downloading: 73MB of 73MB" and pushed out everything worth reading.
+       */
+      const bucket = st.pct === null || st.pct === undefined ? 'x' : Math.floor(st.pct / 25);
+      const key = st.phase + ':' + bucket;
+      if (key !== lastLoggedInstall) {
+        lastLoggedInstall = key;
+        remember('log', [st.phase + ': ' + st.detail]);
+      }
+    },
+  }).then((r) => {
+    remember('log', ['payload installed (' + r.files + ' files) — starting the server']);
+    startServer();
+  }).catch((e) => {
+    installState = { phase: 'failed', detail: String(e && e.message ? e.message : e), pct: null };
+    /*
+     * ⚠️ A FAILED *UPDATE* IS NOT FATAL — a failed first install is. If a server is already on disk
+     * it is still perfectly good, and refusing to boot because a newer one could not be fetched
+     * would turn an unreachable update server into an outage at every site at once.
+     */
+    if (manifest && fs.existsSync(SERVER_ENTRY)) {
+      remember('error', ['update to ' + manifest.version + ' failed (' + installState.detail +
+                         ') — starting the installed server instead']);
+      return startServer();
+    }
+    fatalMessage = 'could not install the server payload: ' + installState.detail;
+    remember('error', [fatalMessage]);
+    post({ type: 'st-server-fatal', message: fatalMessage });
+  });
+}
+
+if (fs.existsSync(SERVER_ENTRY) && !AUTO_UPDATE) {
+  installState = { phase: 'installed', detail: 'already present (updates off)', pct: 100 };
+  startServer();
+} else if (fs.existsSync(SERVER_ENTRY)) {
+  const have = installedVersion();
+  installState = { phase: 'checking', detail: 'checking for a newer server', pct: null };
+  fetchManifest((m) => {
+    if (!m || m.version === have) {
+      /*
+       * ⚠️ "Same version" and "could not ask" take the SAME branch deliberately: the only safe
+       * reading of an unanswerable question is to change nothing.
+       */
+      installState = { phase: 'installed', detail: 'already present (' + (have || '?') + ')', pct: 100 };
+      return startServer();
+    }
+    remember('log', ['payload ' + m.version + ' published, have ' + (have || 'none')]);
+    runInstall(m);
+  });
+} else {
+  runInstall(null);
 }
 
 /*

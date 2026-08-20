@@ -1,4 +1,10 @@
 {
   "_comment": "Copy to st-config.json on the player's storage root. Absent or 0 means this device does NOT run a server - which is the default, because exactly one box per site should host one.",
-  "server": 0
+  "server": 0,
+
+  "_payloadUrl": "Where the server package comes from. Defaults to alpha.screentinker.com, which is right for our boxes and wrong for yours: point this at your own host so a site does not reach across the internet to us to update software running on its own hardware. The launcher reads <payloadUrl with .zip swapped for .json> to learn what version is published, so both files must sit together.",
+  "payloadUrl": "https://alpha.screentinker.com/scripts/server-payload.zip",
+
+  "_autoUpdate": "true (default) checks that manifest on every boot and installs a different version. Set false to pin this box to whatever it already has. A failed check or a failed update NEVER stops the installed server from starting.",
+  "autoUpdate": true
 }
