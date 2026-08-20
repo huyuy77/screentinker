@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.0.0-alpha1
+
+The second Node Mesh alpha. The mesh is still **off by default** and still read-only; the limits
+listed under 2.0.0-alpha0 all still apply unchanged. This release is what using alpha0 on real
+hardware turned up, plus a player fix that has nothing to do with the mesh and matters to everyone.
+
+### Fixed — a duration-only playlist edit never reached the player (#295)
+
+Change nothing but an item's duration, publish, and a running player kept advancing on the old
+value. Reloading the page did not help either, because the stale duration was also in the player's
+local cache.
+
+The player fingerprints the item list to decide whether a change is big enough to **restart**
+playback, and duration is deliberately not part of that — a duration edit must not send the screen
+back to item 1. It simply had nowhere else to be applied.
+
+It is now applied in place and written to the cache, along with **every other per-item field that
+does not need a restart**: mute, captions, subtitles and title were in exactly the same trap. A mute
+change on the item currently on screen takes effect immediately rather than at the next loop.
+
+Reported, diagnosed and patched by **@stuart-hampl**, who also spotted that duration was not the
+only field affected. Thank you.
+
+### Fixed — a remote screen shows a picture
+
+Screenshots from a connected server now render in the Displays list and on the device page. The
+proxy was there in alpha0 and did not work in a browser: it required an auth header, and an `<img>`
+tag cannot send one.
+
+### Fixed — BrightSign server upgrades
+
+The BrightSign server package can now update itself in the field instead of needing a card pulled:
+it fetches a manifest, compares a checksum, and installs only on a real difference. First install is
+handled too, which the first cut of this missed — a player with no payload yet would sit waiting for
+a change that had already happened. Every install verifies its checksum before extracting.
+
+The bootable package is now called **`autorun-server`** rather than `autorun-boot`.
+
+### Added — Simplified Chinese, and French at full parity
+
+- **Simplified Chinese** (`简体中文`), complete — 1821 of 1821 strings. Contributed by **@huyuy77**.
+- **French** goes from 1156 to 1821 strings, so it is no longer half English in practice.
+  Contributed by **@giyokun**, who also corrected a set of Japanese machine-translation artefacts —
+  "opt-in" had been rendering as *optional power-on*, and "clean exit" as a literal pretty doorway.
+
+### Known limits
+
+Unchanged from 2.0.0-alpha0 — read-only, two tiers, no content/schedules/widgets/layouts across a
+link, and both sides on 2.0.0 or newer. See that entry.
+
 ## 2.0.0-alpha0
 
 The first build of **Node Mesh**: connecting one ScreenTinker server to another, so an operator
