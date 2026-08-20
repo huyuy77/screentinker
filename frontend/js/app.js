@@ -10,6 +10,7 @@ import * as schedule from './views/schedule.js';
 import * as widgets from './views/widgets.js';
 import * as videoWall from './views/video-wall.js';
 import * as reports from './views/reports.js';
+import * as servers from './views/servers.js';
 import * as activity from './views/activity.js';
 import * as kiosk from './views/kiosk.js';
 import * as onboarding from './views/onboarding.js';
@@ -167,6 +168,7 @@ const NAV_LABEL_KEYS = {
   schedule: 'nav.schedule',
   walls: 'nav.walls',
   reports: 'nav.reports',
+  servers: 'nav.servers',
   kiosk: 'nav.kiosk',
   designer: 'nav.designer',
   activity: 'nav.activity',
@@ -506,6 +508,16 @@ function route() {
   } else if (hash === '#/walls' || hash.startsWith('#/wall/')) {
     currentView = videoWall;
     videoWall.render(app);
+  } else if (hash === '#/servers') {
+    /*
+     * ⚠️ Its own route, deliberately NOT behind the workspace switcher. The switcher
+     * mints a JWT with current_workspace_id and reloads — it assumes a LOCAL, WRITABLE
+     * workspace. Putting remote ones behind it would give every write surface (bulk
+     * assign, drag-to-group, playlist assign, the schedule editor) a disabled state,
+     * and a UI full of dead controls teaches people the product is broken.
+     */
+    currentView = servers;
+    servers.render(app);
   } else if (hash === '#/reports') {
     currentView = reports;
     reports.render(app);
@@ -584,6 +596,23 @@ function updateSidebarUser() {
   // Runs at boot from the cached user (no flash on warm loads) and again after /me.
   const billingNav = document.getElementById('billingNavItem');
   if (billingNav) billingNav.style.display = user.hide_billing ? 'none' : '';
+
+  /*
+   * Servers appears only when this node is actually a hub.
+   *
+   * ⚠️ ASKED, NOT ASSUMED. There is no client-side flag for MESH_ACCEPT_ENROLLMENT and there should
+   * not be: the server mounts /api/mesh only when it is set, so the honest test is whether the API
+   * answers. A hardcoded flag in the bundle would drift the moment someone changed the env var.
+   *
+   * It starts hidden and is revealed on success, so an ordinary install never flashes a section it
+   * does not have — the same no-flash reasoning as the billing item above.
+   */
+  const serversNav = document.getElementById('serversNavItem');
+  if (serversNav) {
+    api.get('/mesh/nodes')
+      .then(() => { serversNav.style.display = ''; })
+      .catch(() => { serversNav.style.display = 'none'; });
+  }
 
   let userEl = document.getElementById('sidebarUser');
   if (!userEl) {

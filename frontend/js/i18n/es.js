@@ -27,6 +27,7 @@ export default {
   'nav.schedule': 'Horario',
   'nav.walls': 'Muros de video',
   'nav.reports': 'Informes',
+  'nav.servers': 'Servers',
   'nav.kiosk': 'Kiosco',
   'nav.designer': 'Diseñador',
   'nav.activity': 'Actividad',

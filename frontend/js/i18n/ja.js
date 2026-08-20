@@ -71,6 +71,7 @@ export default {
   'nav.schedule': "スケジュール",
   'nav.walls': "ビデオウォール",
   'nav.reports': "レポート",
+  'nav.servers': 'Servers',
   'nav.kiosk': "キオスク",
   'nav.designer': "デザイナー",
   'nav.activity': "アクティビティ",

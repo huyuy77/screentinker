@@ -85,6 +85,7 @@ export default {
   'nav.schedule': 'Schedule',
   'nav.walls': 'Video Walls',
   'nav.reports': 'Reports',
+  'nav.servers': 'Servers',
   'nav.kiosk': 'Kiosk',
   'nav.designer': 'Designer',
   'nav.activity': 'Activity',

@@ -250,6 +250,16 @@ this staying maintainable by one person.
 
 ## Phase 3 — Hub UI *(requires Track A2 merged)*
 
+> **Status (partial).** A2 is merged. Landed: tri-state status, client-scoped read-only hub API
+> (`routes/mesh.js`), presentation logic (`lib/mesh/hub-view.js`), the **Servers** section
+> (`frontend/js/views/servers.js`) with server-side search and pagination, per-node rollup, deep
+> links, and the uptime endpoint.
+>
+> ⚠️ Remaining: the cross-node **alert inbox** as a UI (the API is there), the **topology view** as a
+> UI (ditto), and the **exportable** per-client uptime report — `uptimeReport()` currently aggregates
+> across visible nodes rather than grouping by client, so a per-client export needs the client
+> grouping wired through and a CSV/PDF surface.
+
 ### Information architecture
 - **New top-level section: Servers.** Nodes, proxies, relays, sinks live here. Players stay exactly
   where they are today.

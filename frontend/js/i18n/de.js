@@ -28,6 +28,7 @@ export default {
   'nav.schedule': 'Zeitplan',
   'nav.walls': 'Videowände',
   'nav.reports': 'Berichte',
+  'nav.servers': 'Servers',
   'nav.kiosk': 'Kiosk',
   'nav.designer': 'Designer',
   'nav.activity': 'Aktivität',
