@@ -28,14 +28,45 @@
  * gets health-shaped rows and no names — the same degradation as the mirror, because the grant is
  * the client's decision and a proxy must not become the way around it.
  */
-const READABLE = Object.freeze({
-  '/api/devices':  { grant: 'health', scope: 'workspace' },
-  '/api/groups':   { grant: 'identity', scope: 'workspace' },
-  '/api/playlists': { grant: 'content-metadata', scope: 'workspace' },
-});
+const READABLE = Object.freeze([
+  { pattern: '/api/devices',                  grant: 'health',           scope: 'workspace' },
+  { pattern: '/api/devices/:id',              grant: 'health',           scope: 'workspace' },
+  { pattern: '/api/devices/:id/telemetry',    grant: 'health',           scope: 'workspace' },
+  { pattern: '/api/assignments/device/:id',   grant: 'content-metadata', scope: 'workspace' },
+  { pattern: '/api/groups',                   grant: 'identity',         scope: 'workspace' },
+  { pattern: '/api/playlists',                grant: 'content-metadata', scope: 'workspace' },
+  { pattern: '/api/playlists/:id',            grant: 'content-metadata', scope: 'workspace' },
+]);
+
+/*
+ * ⚠️ SEGMENT-EXACT MATCHING, and this is where an allowlist usually springs a leak.
+ *
+ * A naive `path.startsWith(pattern)` makes `/api/devices/:id` match `/api/devices/123/block` —
+ * a write, admitted by a list intended to permit reads. So the segment COUNT must agree, every
+ * literal segment must match exactly, and a `:param` segment may not be empty, contain a slash, or
+ * be a traversal token. Anything else is refused.
+ */
+function matchPath(path) {
+  const got = String(path || '').split('?')[0].split('/');
+  for (const rule of READABLE) {
+    const want = rule.pattern.split('/');
+    if (want.length !== got.length) continue;
+    let ok = true;
+    for (let i = 0; i < want.length; i++) {
+      if (want[i].startsWith(':')) {
+        const v = got[i];
+        // ⚠️ `.` and `..` are refused explicitly. They are legal path segments and would otherwise
+        // satisfy "some non-empty value", which is how a matcher gets walked out of its own rule.
+        if (!v || v === '.' || v === '..' || v.includes('%2f') || v.includes('%2F')) { ok = false; break; }
+      } else if (want[i] !== got[i]) { ok = false; break; }
+    }
+    if (ok) return rule;
+  }
+  return null;
+}
 
 function isReadable(path) {
-  return Object.prototype.hasOwnProperty.call(READABLE, path);
+  return !!matchPath(path);
 }
 
 /**
@@ -53,21 +84,21 @@ function authorize(edge, path, method, grants) {
       reason: 'This connection can read, and cannot write. Only GET is accepted.',
     };
   }
-  if (!isReadable(path)) {
+  if (!matchPath(path)) {
     /*
      * ⚠️ The refusal does not distinguish "no such route" from "not allowed", because a parent has
      * no business mapping this server's API surface. It only needs to know the answer is no.
      */
     return { ok: false, reason: 'That is not something this connection may read.' };
   }
-  const need = READABLE[path].grant;
-  if (!grants.includes(need)) {
+  const rule = matchPath(path);
+  if (!grants.includes(rule.grant)) {
     return {
       ok: false,
-      reason: `This connection was not granted "${need}", so it cannot read that.`,
+      reason: `This connection was not granted "${rule.grant}", so it cannot read that.`,
     };
   }
-  return { ok: true, rule: READABLE[path] };
+  return { ok: true, rule };
 }
 
 /**
@@ -96,4 +127,19 @@ function projectRows(rows, grants, projectOne) {
   return rows.map((r) => projectOne(r, grants));
 }
 
-module.exports = { READABLE, isReadable, authorize, scopeRows, projectRows };
+/*
+ * ⚠️ WRITES ARE NOT MERELY ABSENT — the vocabulary for them already exists and is deliberately
+ * unused here. grants.js defines WRITE_CATEGORIES (`content-push`, `device-command`), so when a
+ * linked server is meant to behave like a local one in both directions, the rule is already
+ * expressible: a write path names the write grant it needs, and an edge without it is refused by
+ * the same code path that refuses an ungranted read.
+ *
+ * Until that lands, this function exists to make the answer explicit rather than implied by the
+ * absence of a branch — "there is no write handler" is a fact about today's code, and facts about
+ * today's code are not a security control.
+ */
+function writesAllowed() {
+  return false;
+}
+
+module.exports = { READABLE, isReadable, matchPath, authorize, scopeRows, projectRows, writesAllowed };

@@ -175,29 +175,84 @@ function answerRead(db, edge, req) {
 
   const shared = edge.shared_workspaces ? store.safeParseArray(edge.shared_workspaces) : null;
 
-  if (req.path === '/api/devices') {
+  const path = String(req.path || '').split('?')[0];
+  const seg = path.split('/');
+  const inScope = (wsId) => !shared || !shared.length || wsId == null || shared.includes(wsId);
+
+  if (path === '/api/devices') {
     /*
      * ⚠️ Built from the same projection the mirror uses, so a field cannot travel over the proxy
      * that would not travel over the mirror. Two paths to the same data with two different filters
      * is how one of them ends up more generous than anybody intended.
      */
-    const rows = deviceProjections(db, grants, edge);
-    const scoped = readProxy.scopeRows(rows, shared);
-    return { ok: true, rows: scoped, asOf: nowSec() };
+    return { ok: true, rows: readProxy.scopeRows(deviceProjections(db, grants, edge), shared),
+             asOf: nowSec() };
   }
 
-  if (req.path === '/api/groups') {
+  if (seg.length === 4 && seg[2] === 'devices') {
+    /*
+     * ⚠️ THE SCOPE IS CHECKED ON THE ROW, NOT ON THE REQUEST. A single-object read cannot be
+     * filtered by the list comprehension that protects the collection, so it needs its own check —
+     * and a parent guessing device ids from another workspace is exactly the shape of attack a
+     * per-collection filter misses.
+     */
+    const one = deviceProjections(db, grants, edge).find((d) => d.id === seg[3]);
+    if (!one) return { ok: false, reason: 'No such screen on this server.' };
+    return { ok: true, row: one, asOf: nowSec() };
+  }
+
+  if (seg.length === 5 && seg[2] === 'devices' && seg[4] === 'telemetry') {
+    const owns = deviceProjections(db, grants, edge).some((d) => d.id === seg[3]);
+    if (!owns) return { ok: false, reason: 'No such screen on this server.' };
+    try {
+      const rows = db.prepare(
+        `SELECT battery_level, battery_charging, storage_free_mb, storage_total_mb, ram_free_mb,
+                ram_total_mb, cpu_usage, wifi_rssi, uptime_seconds, local_ip, local_ip6,
+                attached_display, video_mode, temperature_c, reported_at
+           FROM device_telemetry WHERE device_id = ? ORDER BY reported_at DESC LIMIT 50`).all(seg[3]);
+      return { ok: true, rows, asOf: nowSec() };
+    } catch (e) { return { ok: true, rows: [], asOf: nowSec() }; }
+  }
+
+  if (seg.length === 5 && seg[2] === 'assignments' && seg[3] === 'device') {
+    const owns = deviceProjections(db, grants, edge).some((d) => d.id === seg[4]);
+    if (!owns) return { ok: false, reason: 'No such screen on this server.' };
+    try {
+      const rows = db.prepare(
+        `SELECT a.*, p.name AS playlist_name
+           FROM assignments a LEFT JOIN playlists p ON p.id = a.playlist_id
+          WHERE a.device_id = ?`).all(seg[4]);
+      return { ok: true, rows, asOf: nowSec() };
+    } catch (e) { return { ok: true, rows: [], asOf: nowSec() }; }
+  }
+
+  if (path === '/api/groups') {
     try {
       const rows = db.prepare('SELECT id, name, workspace_id FROM device_groups').all();
       return { ok: true, rows: readProxy.scopeRows(rows, shared), asOf: nowSec() };
     } catch (e) { return { ok: true, rows: [], asOf: nowSec() }; }
   }
 
-  if (req.path === '/api/playlists') {
+  if (path === '/api/playlists') {
     try {
-      const rows = db.prepare('SELECT id, name, workspace_id FROM playlists').all();
+      const rows = db.prepare(
+        'SELECT id, name, workspace_id, created_at, updated_at FROM playlists').all();
       return { ok: true, rows: readProxy.scopeRows(rows, shared), asOf: nowSec() };
     } catch (e) { return { ok: true, rows: [], asOf: nowSec() }; }
+  }
+
+  if (seg.length === 4 && seg[2] === 'playlists') {
+    try {
+      const row = db.prepare('SELECT * FROM playlists WHERE id = ?').get(seg[3]);
+      if (!row || !inScope(row.workspace_id)) {
+        return { ok: false, reason: 'No such playlist on this server.' };
+      }
+      const items = db.prepare(
+        `SELECT i.*, c.name AS content_name, c.type AS content_type
+           FROM playlist_items i LEFT JOIN content c ON c.id = i.content_id
+          WHERE i.playlist_id = ? ORDER BY i.position`).all(seg[3]);
+      return { ok: true, row: { ...row, items }, asOf: nowSec() };
+    } catch (e) { return { ok: false, reason: 'Could not read that playlist.' }; }
   }
 
   return { ok: false, reason: 'That is not something this connection may read.' };

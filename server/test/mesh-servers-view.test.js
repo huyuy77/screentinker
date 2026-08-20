@@ -359,8 +359,15 @@ test('⚠️ a remote org renders THE SAME CARDS as a local one', () => {
   assert.ok(fn.length > 100, 'the remote renderer must exist');
   assert.match(fn, /renderDeviceCard/, 'the same card renderer as local screens');
   assert.match(fn, /class="device-grid"/, 'in the same grid');
-  assert.match(fn, /\/mesh\/read\/\$\{encodeURIComponent\(org\.nodeId\)\}\?path=\/api\/devices/,
-    'read through to the server that owns them');
+  /*
+   * ⚠️ And it is the ORDINARY call. api.js routes it to the selected server, so this view does not
+   * name the mesh at all — a view that has to would be a view somebody forgets to update, and the
+   * branch they forget is the one that renders local data under a remote heading.
+   */
+  assert.match(fn, /await api\.get\('\/devices'\)/, 'the same call a local dashboard makes');
+  const API = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'js', 'api.js'), 'utf8');
+  assert.match(API, /mesh\/read\/\$\{encodeURIComponent\(org\.nodeId\)\}/,
+    'with the routing done once, in the api layer');
 });
 
 test('⚠️ the ACTIONS are removed from the DOM, not disabled', () => {
@@ -373,8 +380,22 @@ test('⚠️ the ACTIONS are removed from the DOM, not disabled', () => {
                              DASHBOARD.indexOf('async function loadDashboard'));
   assert.match(fn, /removeAttribute\('draggable'\)/);
   assert.match(fn, /\.device-card-select'\)\?\.remove\(\)/);
-  assert.match(fn, /removeAttribute\('onclick'\)/,
-    'the local device route does not exist for a remote screen');
+
+  /*
+   * ⚠️ NAVIGATION IS NOT AN ACTION, and it stays. A card you cannot open turns a customer's estate
+   * into a picture of one. Clicking through is the entire point of making remote orgs first-class.
+   */
+  assert.doesNotMatch(fn, /removeAttribute\('onclick'\)/,
+    'opening a screen must survive — looking is not changing');
+
+  /*
+   * ⚠️ And the DOM sweep is COSMETIC, not the control. The enforcement is in api.js, which refuses
+   * every non-GET while a remote org is selected — so a mutating control this sweep never knew
+   * about fails loudly instead of silently writing to the wrong server.
+   */
+  const API = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'js', 'api.js'), 'utf8');
+  assert.match(API, /!== 'GET'[\s\S]{0,200}refuse:/,
+    'writes are refused at the api layer while viewing another server');
 });
 
 test('⚠️ an offline server falls back to the mirror AND SAYS SO', () => {
@@ -402,7 +423,14 @@ test('⚠️ THE PARENT MAY ASK AND CANNOT TELL — enforced by an allowlist on 
    */
   const proxy = fs.readFileSync(
     path.join(__dirname, '..', 'lib', 'mesh', 'read-proxy.js'), 'utf8');
-  assert.match(proxy, /const READABLE = Object\.freeze\(\{/, 'an allowlist, not a blocklist');
+  assert.match(proxy, /const READABLE = Object\.freeze\(\[/, 'an allowlist, not a blocklist');
+  /*
+   * ⚠️ And it matches by SEGMENT, which is where an allowlist usually springs a leak: a naive
+   * startsWith makes `/api/devices/:id` match `/api/devices/123/block` — a write, admitted by a list
+   * meant to permit reads.
+   */
+  assert.match(proxy, /want\.length !== got\.length/, 'segment counts must agree');
+  assert.match(proxy, /v === '\.\.'/, 'and traversal tokens are refused explicitly');
   assert.match(proxy, /!== 'GET'/, 'and the method is pinned');
   for (const verb of ['POST', 'PUT', 'PATCH', 'DELETE']) {
     assert.ok(!new RegExp(`'${verb}'\\s*:`).test(proxy), `${verb} must not be routable`);
@@ -414,10 +442,10 @@ test('every readable path names the grant it needs', () => {
   // travels — two paths to the same data, one of them more generous than anybody intended.
   const proxy = fs.readFileSync(
     path.join(__dirname, '..', 'lib', 'mesh', 'read-proxy.js'), 'utf8');
-  const block = proxy.slice(proxy.indexOf('const READABLE'), proxy.indexOf('function isReadable'));
-  const paths = [...block.matchAll(/'(\/api\/[a-z-]+)':/g)].map((m) => m[1]);
-  assert.ok(paths.length >= 1, 'there must be readable paths');
-  for (const p of paths) {
-    assert.match(block, new RegExp(`'${p}':\\s*\\{[^}]*grant:`), `${p} must declare a grant`);
+  const block = proxy.slice(proxy.indexOf('const READABLE'), proxy.indexOf('function matchPath'));
+  const rules = [...block.matchAll(/\{\s*pattern:\s*'([^']+)'([^}]*)\}/g)];
+  assert.ok(rules.length >= 4, 'there must be readable paths');
+  for (const [, pat, rest] of rules) {
+    assert.match(rest, /grant:/, `${pat} must declare a grant`);
   }
 });

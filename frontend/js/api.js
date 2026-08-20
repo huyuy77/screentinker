@@ -5,7 +5,75 @@ function getAuthHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/*
+ * ⚠️ WHEN A REMOTE ORG IS SELECTED, READS GO TO THAT SERVER — transparently, so a view does not
+ * have to know. That is what "a linked server behaves exactly like a local one" has to mean in
+ * practice: the alternative is every view growing an `if (remote)` branch, and the branches that
+ * get forgotten are the ones that quietly show local data under a remote heading.
+ *
+ * ⚠️ ONLY DATA PATHS ARE REDIRECTED. Anything about THIS server or THIS session — signing in, the
+ * account, the workspace list, the mesh routes themselves — must stay local, or selecting a
+ * customer would log you into their server. The list is therefore an allowlist of prefixes, not a
+ * blocklist: a route added later is local until somebody deliberately says otherwise.
+ *
+ * ⚠️ WRITES ARE NEVER REDIRECTED, and are refused outright while a remote org is selected. Sending
+ * them locally would be far worse than failing: an edit meant for a customer's screen would land
+ * silently on one of your own.
+ */
+const REMOTE_READABLE = ['/devices', '/assignments/device/', '/groups', '/playlists'];
+
+/*
+ * ⚠️ WORKSPACE DATA WE CANNOT YET READ REMOTELY, AND MUST NOT SERVE LOCALLY.
+ *
+ * This is the failure mode the allowlist above would otherwise create: a path that is not routed
+ * falls through to the local server, so viewing a customer's org would render YOUR content library
+ * inside THEIR device page — with nothing on screen to say so. That is worse than an error, because
+ * it looks right.
+ *
+ * Resolved as empty rather than thrown: these feed pickers and side panels, and a rejection there
+ * takes the whole page down over a list nobody can act on in a read-only view anyway.
+ */
+const REMOTE_UNAVAILABLE = ['/content', '/walls', '/schedules', '/widgets', '/layouts'];
+
+function remoteOrg() {
+  try { return JSON.parse(localStorage.getItem('st_remote_org') || 'null'); } catch (e) { return null; }
+}
+
+function remoteRoute(url, method) {
+  const org = remoteOrg();
+  if (!org) return null;
+  const path = String(url).split('?')[0];
+  if (REMOTE_UNAVAILABLE.some((p) => path === p || path.startsWith(p + '/'))) {
+    return { empty: true };
+  }
+  if (!REMOTE_READABLE.some((p) => path === p || path.startsWith(p))) return null;
+  if ((method || 'GET').toUpperCase() !== 'GET') {
+    return { refuse: 'This server is being viewed read-only. Switch back to make changes.' };
+  }
+  return { url: `/mesh/read/${encodeURIComponent(org.nodeId)}?path=${encodeURIComponent('/api' + url)}` };
+}
+
 async function request(url, options = {}) {
+  const routed = remoteRoute(url, options.method);
+  if (routed && routed.refuse) throw new Error(routed.refuse);
+  if (routed && routed.empty) return [];
+  if (routed) {
+    const r = await fetch(API_BASE + routed.url, {
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || 'That server did not answer');
+    }
+    const body = await r.json();
+    /*
+     * ⚠️ Unwrapped to the shape the caller expects. The proxy envelope is a transport detail; a view
+     * asking for devices should get devices, not { ok, rows }, or every caller learns about the
+     * mesh and the transparency is lost.
+     */
+    return body.rows !== undefined ? body.rows : (body.row !== undefined ? body.row : body);
+  }
+
   const res = await fetch(API_BASE + url, {
     headers: { 'Content-Type': 'application/json', ...getAuthHeaders(), ...options.headers },
     ...options,

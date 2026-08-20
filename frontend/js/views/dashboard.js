@@ -628,8 +628,13 @@ async function loadRemoteDashboard(org) {
   let rows = null;
   let liveError = null;
   try {
-    const r = await api.get(`/mesh/read/${encodeURIComponent(org.nodeId)}?path=/api/devices`);
-    rows = r.rows || [];
+    /*
+     * ⚠️ The ORDINARY call. api.js routes it to the selected server, so this line is identical to
+     * the local one — which is the point: a view that has to name the mesh is a view somebody will
+     * forget to update, and the branch they forget is the one that shows local data under a remote
+     * heading.
+     */
+    rows = await api.get('/devices');
   } catch (e) {
     liveError = e.message || 'that server did not answer';
   }
@@ -677,11 +682,15 @@ async function loadRemoteDashboard(org) {
    * The card itself still opens the device, because looking is the whole point.
    */
   main.querySelectorAll('.device-card').forEach((card) => {
+    /*
+     * ⚠️ The ACTIONS go; the NAVIGATION stays. A disabled control still says the feature exists here
+     * and is broken, and an unwired one looks live and does nothing — so drag and the bulk-select
+     * checkbox are removed from the DOM outright. Clicking through to the screen is not an action
+     * on it, though: looking is the entire point, and a card you cannot open makes a customer's
+     * estate a picture of an estate.
+     */
     card.removeAttribute('draggable');
     card.querySelector('.device-card-select')?.remove();
-    // Local cards navigate to a local device route that does not exist for a remote screen.
-    card.removeAttribute('onclick');
-    card.style.cursor = 'default';
   });
 
   const stat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
