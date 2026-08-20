@@ -289,7 +289,15 @@ jobs:
 
       - name: Stop server
         if: always()
-        run: kill "$(cat "$RUNNER_TEMP/server.pid")" 2>/dev/null || true
+        run: |
+          PID="$(cat "$RUNNER_TEMP/server.pid" 2>/dev/null || true)"
+          [ -n "$PID" ] || exit 0
+          kill "$PID" 2>/dev/null || true
+          # Wait for it to actually go. The step below used to boot on the same port while this
+          # one was still listening, and its readiness probe was answered by THIS server — so the
+          # mesh assertion tested the wrong process and read 404 from a mesh-off install.
+          for i in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || exit 0; sleep 0.5; done
+          kill -9 "$PID" 2>/dev/null || true
 
       # ⚠️ AND NOW BOOT IT WITH THE FLAGS ON.
       #
@@ -298,17 +306,25 @@ jobs:
       # expensive way — a load-time crash inside a config-gated block took production down with
       # every check green. The boot above deliberately runs the prod configuration (flags unset),
       # which means it can never execute any of this. So boot it a second time.
+      #
+      # ⚠️ ITS OWN PORT AND ITS OWN DATA_DIR, not 3001 again. Sharing the port means a readiness
+      # probe can be satisfied by the server that is supposed to be gone, which is how the first
+      # version of this step passed its boot and then read 404 off the PREVIOUS process. A port
+      # nothing else can be listening on makes "it answered" mean "this server answered".
       - name: Boot server with the mesh ON
         working-directory: server
         env:
           SELF_HOSTED: 'true'
+          PORT: '3002'
           MESH_ACCEPT_ENROLLMENT: '1'
           MESH_ALLOW_UPLINK: '1'
         run: |
+          export DATA_DIR="$RUNNER_TEMP/mesh-data"
+          mkdir -p "$DATA_DIR"
           node server.js > "$RUNNER_TEMP/server-mesh.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/server-mesh.pid"
           for i in $(seq 1 30); do
-            curl -sf http://localhost:3001/api/status >/dev/null && exit 0
+            curl -sf http://localhost:3002/api/status >/dev/null && exit 0
             sleep 1
           done
           echo "server did not come up with the mesh on:"; cat "$RUNNER_TEMP/server-mesh.log"; exit 1
@@ -318,7 +334,7 @@ jobs:
       # really mounted and reached; 404 would mean the flag did not take.
       - name: Assert the mesh surface answers when enabled
         run: |
-          CODE="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/api/mesh/nodes)"
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3002/api/mesh/nodes)"
           echo "/api/mesh/nodes with MESH_ACCEPT_ENROLLMENT=1 -> HTTP $CODE (want 401, i.e. mounted)"
           test "$CODE" = "401"
           grep -q "\[mesh\] hub API mounted" "$RUNNER_TEMP/server-mesh.log" \
