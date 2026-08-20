@@ -9,9 +9,10 @@ import pt from './i18n/pt.js';
 import hi from './i18n/hi.js';
 import it from './i18n/it.js';
 import ja from './i18n/ja.js';
+import zh from './i18n/zh.js';
 
 const fallback = en;
-const registry = { en, es, fr, de, pt, hi, it, ja };
+const registry = { en, es, fr, de, pt, hi, it, ja, zh };
 
 let currentLang = localStorage.getItem('rd_lang') || navigator.language?.split('-')[0] || 'en';
 if (!registry[currentLang]) currentLang = 'en';
@@ -89,6 +90,7 @@ export function getAvailableLanguages() {
   return [
     { code: 'en', name: 'English' },
     { code: 'ja', name: '日本語' },
+    { code: 'zh', name: '简体中文' },
     { code: 'es', name: 'Español' },
     { code: 'fr', name: 'Français' },
     { code: 'it', name: 'Italiano' },
