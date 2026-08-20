@@ -65,6 +65,23 @@ no such handler exists in `server/lib/mesh/` proves there is nothing to fire. Sa
 address: the risk is not that today's code calls a vendor host, it is that a future "sensible default"
 gets added during an outage. A source assertion is what catches that in review.
 
+### The uptime report
+
+`server/lib/mesh/uptime-report.js` produces the per-client artifact, and three of its rules exist
+because the obvious implementation is confidently wrong rather than obviously broken:
+
+- **Fleet uptime is device-weighted, never wall-clock-merged.** Merging overlapping incidents is right
+  *within* a device (two rules, one outage) and catastrophic *across* one — a single dead screen
+  unions with the whole estate and reports the client as 0%.
+- **The denominator is time observed, not time elapsed.** A screen installed mid-window is not scored
+  as down before it existed (`mesh_mirror_devices.first_seen_at`), and a retired one stops counting
+  when it was retired.
+- **Silence is not success.** Incidents are the only evidence of downtime, so a site whose link died a
+  week ago sends none and scores 100% — a broken collector producing a beautiful report. Unseen time
+  is excluded from the numerator and surfaced as **coverage**, rendered beside uptime at the same
+  size. `csvCell()` also neutralises spreadsheet formula injection, because screen names arrive from
+  another server and land in a document the customer opens in Excel.
+
 ### The depth gate
 
 `MESH_MAX_DEPTH` defaults to **2** and must not be raised in code. The machinery for deeper trees

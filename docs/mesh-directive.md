@@ -250,15 +250,24 @@ this staying maintainable by one person.
 
 ## Phase 3 — Hub UI *(requires Track A2 merged)*
 
-> **Status (partial).** A2 is merged. Landed: tri-state status, client-scoped read-only hub API
+> **Status: complete.** A2 is merged. Landed: tri-state status, client-scoped read-only hub API
 > (`routes/mesh.js`), presentation logic (`lib/mesh/hub-view.js`), the **Servers** section
-> (`frontend/js/views/servers.js`) with server-side search and pagination, per-node rollup, deep
-> links, and the uptime endpoint.
+> (`frontend/js/views/servers.js`) as four tabs — screens, alert inbox, topology, uptime report —
+> with server-side search and pagination, per-node rollup, deep links, and the exportable per-client
+> uptime report (`lib/mesh/uptime-report.js`, CSV).
 >
-> ⚠️ Remaining: the cross-node **alert inbox** as a UI (the API is there), the **topology view** as a
-> UI (ditto), and the **exportable** per-client uptime report — `uptimeReport()` currently aggregates
-> across visible nodes rather than grouping by client, so a per-client export needs the client
-> grouping wired through and a CSV/PDF surface.
+> Three defects were found while finishing it, all of the same shape — code that ran, returned, and
+> was wrong in the reassuring direction:
+>
+> 1. **`/uptime` was not scoped.** It checked the caller could see one node, then reported over every
+>    `alert_events` row on the server. A technician named on one client got every client's incident
+>    history. Now the client is resolved and authorised before a row is read.
+> 2. **`openAlerts: 0` was hardcoded** in the node rollup, so a site with nine open alerts rendered a
+>    clean card. A placeholder that renders as a *reassuring* value is worse than a missing one.
+> 3. **`alert-rollup.js` had no caller.** It was written in Phase 2, tested, and never wired in — so
+>    the inbox would have shown forty sites down rather than "suspect this hub's own connection".
+>    Wiring it exposed a units mismatch (ms window vs second timestamps) that would have silently
+>    disabled correlation entirely.
 
 ### Information architecture
 - **New top-level section: Servers.** Nodes, proxies, relays, sinks live here. Players stay exactly

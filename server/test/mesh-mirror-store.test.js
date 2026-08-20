@@ -35,7 +35,7 @@ function freshDb() {
     CREATE TABLE mesh_mirror_devices (
       origin_node_id TEXT NOT NULL, device_id TEXT NOT NULL, name TEXT, status TEXT,
       last_heartbeat INTEGER, body TEXT NOT NULL DEFAULT '{}', origin_ts INTEGER,
-      received_at INTEGER NOT NULL, deleted_at INTEGER,
+      received_at INTEGER NOT NULL, deleted_at INTEGER, first_seen_at INTEGER,
       PRIMARY KEY (origin_node_id, device_id));
     CREATE TABLE mesh_mirror_alerts (
       id TEXT PRIMARY KEY, origin_node_id TEXT NOT NULL, alert_type TEXT NOT NULL, severity TEXT,
@@ -299,4 +299,35 @@ test('⚠️ the fixture schema matches the REAL one', () => {
   } finally {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
   }
+});
+
+test('⚠️ first_seen_at is set ONCE and never re-stamped', () => {
+  /*
+   * received_at cannot answer "when did this hub first see this screen" — the row is upserted, so it
+   * is always the latest report. Without a separate first-seen, the uptime report has to assume every
+   * screen existed for the whole window, which scores a screen installed on the 20th as broken for
+   * the first 19 days of the month.
+   *
+   * And it must survive a tombstone: identity is stable (I4), so a screen that comes back is the same
+   * screen and its history still belongs to it. Re-stamping would read as "installed today" and drop
+   * it out of every report covering the period it was actually running.
+   */
+  const db = freshDb();
+  try {
+    const send = (at) => ms.storeEnvelope(
+      db, edge(), env('device-summary', { id: 'dev-1', name: 'Lobby', status: 'online' }), at);
+
+    send(NOW);
+    const first = db.prepare('SELECT first_seen_at FROM mesh_mirror_devices').get().first_seen_at;
+    assert.equal(first, NOW, 'stamped on first sight');
+
+    send(NOW + 5000);
+    db.prepare('UPDATE mesh_mirror_devices SET deleted_at = ?').run(NOW + 6000);
+    send(NOW + 7000);
+
+    const row = db.prepare('SELECT * FROM mesh_mirror_devices').get();
+    assert.equal(row.first_seen_at, first, 'unchanged by later reports, or by coming back');
+    assert.equal(row.deleted_at, null, 'while the tombstone still clears');
+    assert.equal(row.received_at, NOW + 7000, 'and received_at still tracks the latest');
+  } finally { cleanup(db); }
 });

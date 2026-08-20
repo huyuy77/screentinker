@@ -47,8 +47,9 @@ function upsertDevice(db, { originNodeId, body, originTs, receivedAt }) {
   if (!body || !body.id) return false;
   db.prepare(`
     INSERT INTO mesh_mirror_devices
-      (origin_node_id, device_id, name, status, last_heartbeat, body, origin_ts, received_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (origin_node_id, device_id, name, status, last_heartbeat, body, origin_ts, received_at,
+       first_seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(origin_node_id, device_id) DO UPDATE SET
       name           = excluded.name,
       status         = excluded.status,
@@ -58,8 +59,15 @@ function upsertDevice(db, { originNodeId, body, originTs, receivedAt }) {
       received_at    = excluded.received_at,
       -- A device that reports again is not deleted, whatever a stale tombstone said.
       deleted_at     = NULL
+      -- ⚠️ first_seen_at is deliberately ABSENT from this SET list, which is what makes it mean
+      -- "first", and it is not re-stamped when a tombstoned screen comes back: identity is stable
+      -- (I4), so a screen that returns is the same screen and its history still belongs to it.
+      -- Rows written before the column existed keep NULL and fall back to received_at in the report,
+      -- rather than being back-stamped to now — which would read as "installed today" and quietly
+      -- drop the whole existing fleet out of the first report anybody ran.
   `).run(originNodeId, body.id, body.name ?? null, body.status ?? null,
-         body.last_heartbeat ?? null, JSON.stringify(body), originTs ?? null, receivedAt);
+         body.last_heartbeat ?? null, JSON.stringify(body), originTs ?? null, receivedAt,
+         receivedAt);
   return true;
 }
 

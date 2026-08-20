@@ -18,7 +18,9 @@ const express = require('express');
 const hubView = require('../lib/mesh/hub-view');
 const clientRoles = require('../lib/mesh/client-roles');
 const clientTree = require('../lib/mesh/client-tree');
-const { openIncidents, uptimeReport } = require('../services/threshold-alerts');
+const meshUptime = require('../lib/mesh/uptime-report');
+const alertRollup = require('../lib/mesh/alert-rollup');
+const { openIncidents } = require('../services/threshold-alerts');
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -31,7 +33,7 @@ module.exports = function meshRoutes(db, { requireAuth }) {
    * count, an aggregate or a "total" to the response — the classic shape of this bug. Resolving the
    * visible set first means the query itself cannot return anything else.
    */
-  function visibleNodeIds(user) {
+  function visibleClientIds(user) {
     const clients = db.prepare('SELECT id, parent_client_id FROM mesh_clients').all();
     const parentOf = new Map(clients.map((c) => [c.id, c.parent_client_id]));
     const getParentId = (id) => parentOf.get(id) || null;
@@ -43,7 +45,40 @@ module.exports = function meshRoutes(db, { requireAuth }) {
       const { role } = clientTree.resolveAccess(c.id, user, getParentId, getAccessRow, clientRoles);
       if (role && clientRoles.roleAllows(role, 'view-mirrored-data')) allowed.add(c.id);
     }
+    return allowed;
+  }
 
+  /**
+   * Every client beneath this one.
+   *
+   * ⚠️ Depth-bounded by a seen-set rather than trusting the tree to be acyclic. client-tree.js
+   * cycle-checks on write, but a walk that assumes its input is well-formed is one bad row away from
+   * hanging the request thread — and a hung report endpoint is indistinguishable from a slow one.
+   */
+  function descendantClientIds(rootId) {
+    const rows = db.prepare('SELECT id, parent_client_id FROM mesh_clients').all();
+    const children = new Map();
+    for (const r of rows) {
+      if (!r.parent_client_id) continue;
+      if (!children.has(r.parent_client_id)) children.set(r.parent_client_id, []);
+      children.get(r.parent_client_id).push(r.id);
+    }
+    const out = [];
+    const seen = new Set([rootId]);
+    const queue = [rootId];
+    while (queue.length) {
+      for (const kid of children.get(queue.shift()) || []) {
+        if (seen.has(kid)) continue;
+        seen.add(kid);
+        out.push(kid);
+        queue.push(kid);
+      }
+    }
+    return out;
+  }
+
+  function visibleNodeIds(user) {
+    const allowed = visibleClientIds(user);
     const edges = db.prepare(
       "SELECT peer_node_id, client_id FROM mesh_edges WHERE direction = 'down' AND revoked_at IS NULL"
     ).all();
@@ -80,11 +115,22 @@ module.exports = function meshRoutes(db, { requireAuth }) {
       byNode.get(d.origin_node_id).push(d);
     }
 
+    /*
+     * ⚠️ Counted, not hardcoded. This was `openAlerts: 0` — the rollup has always had the field and
+     * has always reported none, so a site with nine open alerts rendered a clean card. A placeholder
+     * that renders as a REASSURING value is worse than a missing one, because nothing on screen
+     * invites anybody to check.
+     */
+    const alertCounts = new Map(db.prepare(
+      `SELECT origin_node_id, COUNT(*) AS c FROM mesh_mirror_alerts
+        WHERE origin_node_id IN (${marks}) AND closed_at IS NULL
+        GROUP BY origin_node_id`).all(...ids).map((r) => [r.origin_node_id, r.c]));
+
     const out = ids.map((id) => hubView.nodeRollup({
       node: nodes.find((n) => n.origin_node_id === id) || null,
       edge: edgeFor(id),
       devices: byNode.get(id) || [],
-      openAlerts: 0,
+      openAlerts: alertCounts.get(id) || 0,
     }, now));
 
     res.json({ nodes: out, total: out.length, asOf: now });
@@ -152,14 +198,50 @@ module.exports = function meshRoutes(db, { requireAuth }) {
         WHERE origin_node_id IN (${marks}) AND closed_at IS NULL
         ORDER BY opened_at DESC LIMIT 200`).all(...ids);
 
-    res.json({
-      alerts: rows.map((a) => ({
+    const mirrorStore = require('../lib/mesh/mirror-store');
+    const alerts = rows.map((a) => {
+      const edge = edgeFor(a.origin_node_id);
+      return {
         ...a,
         subjects: a.subjects ? JSON.parse(a.subjects) : null,
-        deepLink: hubView.deepLink(edgeFor(a.origin_node_id), 'alert', a.id),
+        /*
+         * ⚠️ An alert from a node we cannot currently reach is LAST KNOWN, like every other row on
+         * this hub. Without the flag the inbox is the one screen in the product that still implies
+         * live truth — and it is the screen people act on fastest.
+         */
+        stale: mirrorStore.freshnessOf(edge, now) === 'stale',
+        deepLink: hubView.deepLink(edge, 'alert', a.id),
+      };
+    });
+
+    /*
+     * ⚠️ ROLLED UP, AND MOST IMPORTANTLY FOR THE CASE WHERE THIS HUB IS THE BROKEN THING. When most
+     * children go quiet at once the honest reading is "suspect the observer", not "40 sites are
+     * down" — the latter dispatches engineers to premises that are fine. alert-rollup.js has encoded
+     * this since Phase 2 but had no caller until now, so the inbox would have shown the forty.
+     */
+    const rolled = alertRollup.rollup(
+      rows.map((a) => ({
+        node_id: a.origin_node_id,
+        type: a.alert_type,
+        // ⚠️ MILLISECONDS. alert-rollup's correlation window is a ms constant, while every timestamp
+        // stored on this hub is unix SECONDS. Passing seconds against a ms `now` makes every alert
+        // look ancient, so nothing ever correlates and the rollup silently degrades to no rollup at
+        // all — working code, no error, and the self-suspicion case never fires.
+        opened_at: a.opened_at * 1000,
+        severity: a.severity,
+        subject_count: a.subject_count,
       })),
-      total: rows.length,
+      { now: now * 1000, totalChildren: ids.length },
+    ).filter((r) => r.rolled);
+
+    res.json({
+      alerts,
+      total: alerts.length,
       asOf: now,
+      // Only the grouped conditions; a single site's alert stays a single site's alert, named, rather
+      // than being buried in a summary that reads as a statistic.
+      rollups: rolled,
       // Local incidents live in the same inbox — a hub is a node too, and its own problems are not
       // somebody else's category.
       local: openIncidents(db),
@@ -167,24 +249,80 @@ module.exports = function meshRoutes(db, { requireAuth }) {
   });
 
   /**
-   * GET /api/mesh/uptime — the per-client report.
+   * GET /api/mesh/uptime?clientId=… — the per-client report.
    *
    * ⚠️ Bucketed in the ORIGIN's timezone, and the response says so. A store manager's downtime
    * happened during THEIR business hours; bucketing Perth's October by Kenosha days makes every
    * figure quietly wrong with nothing on screen to explain the discrepancy.
+   *
+   * ⚠️ SCOPED PER CLIENT, and an earlier version was NOT — it checked that the caller could see at
+   * least one node and then reported over every alert_events row on this server, which handed a
+   * technician scoped to one client the whole local fleet's incident history. Exactly the
+   * fetch-everything-then-hope shape this file's header warns about, except nothing filtered it at
+   * all. The client is now resolved and authorised before any row is read.
    */
-  router.get('/uptime', requireAuth, (req, res) => {
+  function buildReport(req, clientId) {
     const to = Number(req.query.to) || nowSec();
     const from = Number(req.query.from) || (to - 30 * 86400);
-    const ids = visibleNodeIds(req.user);
-    if (!ids.length) return res.json({ report: null, reason: 'No connected sites are visible to you.' });
+    const client = db.prepare('SELECT id, name FROM mesh_clients WHERE id = ?').get(clientId);
+    if (!client) return { error: 404, reason: 'No such client.' };
+    if (!visibleClientIds(req.user).has(client.id)) {
+      // 404, not 403: "you may not see this" confirms it exists, and client names are commercially
+      // sensitive in exactly the multi-tenant deployments this feature is for.
+      return { error: 404, reason: 'No such client.' };
+    }
 
-    const report = uptimeReport(db, { from, to });
+    const report = meshUptime.clientUptime(db, {
+      clientId: client.id,
+      clientName: client.name,
+      from,
+      to,
+      descendantsOf: (id) => descendantClientIds(id),
+      nowSec: nowSec(),
+    });
     const zone = hubView.zoneFor('report', {
       operatorTz: req.query.tz || null,
       originTz: req.query.originTz || null,
     });
-    res.json({ ...report, timezone: zone, timezoneLabel: hubView.timeLabel('report', zone) });
+    return { report: { ...report, timezone: zone, timezoneLabel: hubView.timeLabel('report', zone) } };
+  }
+
+  router.get('/uptime', requireAuth, (req, res) => {
+    if (!req.query.clientId) {
+      /*
+       * ⚠️ NO IMPLICIT "EVERYTHING" REPORT. A report headed with no client name, mixing several
+       * customers' screens into one percentage, is worse than useless: it is the document somebody
+       * forwards to one of those customers. Asking for the client is one extra parameter and removes
+       * the possibility.
+       */
+      return res.json({
+        report: null,
+        clients: [...visibleClientIds(req.user)].map((id) =>
+          db.prepare('SELECT id, name FROM mesh_clients WHERE id = ?').get(id)).filter(Boolean),
+        reason: 'Choose a client to report on.',
+      });
+    }
+    const out = buildReport(req, String(req.query.clientId));
+    if (out.error) return res.status(out.error).json({ report: null, reason: out.reason });
+    res.json(out.report);
+  });
+
+  /** GET /api/mesh/uptime.csv?clientId=… — the same report, as the artifact. */
+  router.get('/uptime.csv', requireAuth, (req, res) => {
+    const out = buildReport(req, String(req.query.clientId || ''));
+    if (out.error) return res.status(out.error).json({ reason: out.reason });
+
+    /*
+     * ⚠️ The filename is built from a WHITELIST, never from the client name directly. A name is
+     * attacker-influenced text arriving from another server, and dropping it into Content-Disposition
+     * is a header-injection primitive — the same reasoning as lib/brand-filename.js.
+     */
+    const stem = String(out.report.clientName || out.report.clientId || 'client')
+      .replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'client';
+    const day = new Date(out.report.to * 1000).toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="uptime-${stem}-${day}.csv"`);
+    res.send(meshUptime.toCsv(out.report));
   });
 
   /** GET /api/mesh/topology — the graph, for the topology view. */

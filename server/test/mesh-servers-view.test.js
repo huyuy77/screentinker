@@ -123,3 +123,105 @@ test('the view writes nothing (I2)', () => {
     assert.ok(!VIEW.includes(verb), `${verb} in a read-only view`);
   }
 });
+
+/* ===================== Phase 3 completion: the inbox, topology and report tabs ===================== */
+
+test('⚠️ four TABS, not four nav items', () => {
+  /*
+   * Alerts, topology and uptime are all answers about the same set of connected servers. A nav that
+   * grows an entry per question buries the section an operator starts from, and an install with no
+   * mesh would gain three sidebar entries it can never use.
+   */
+  assert.match(VIEW, /const TABS = \[/);
+  for (const tab of ['fleet', 'alerts', 'topology', 'uptime']) {
+    assert.ok(VIEW.includes(`'${tab}'`), `${tab} tab missing`);
+  }
+  assert.equal((INDEX.match(/href="#\/servers"/g) || []).length, 1, 'still exactly one nav entry');
+});
+
+test('⚠️ the SELF-SUSPICION banner renders ABOVE the alerts it explains', () => {
+  /*
+   * When most sites go quiet at once the likely cause is this server's own connection, not forty
+   * simultaneous outages. The reader has to see that BEFORE the forty rows — by row three they are
+   * already phoning a client whose screens are fine.
+   */
+  const banner = VIEW.indexOf("Check this server's connection first");
+  const table = VIEW.indexOf('Open alerts across all servers');
+  assert.ok(banner > -1, 'the banner must exist');
+  assert.ok(banner < table, 'and be rendered before the alert list');
+  assert.match(VIEW, /suspectSelf/);
+});
+
+test('an alert from an unreachable site is marked last known', () => {
+  // Otherwise the inbox is the one screen in the product that still implies live truth.
+  assert.match(VIEW, /a\.stale[\s\S]{0,400}last known/);
+});
+
+test('local incidents share the inbox', () => {
+  // A hub is a node too; its own problems are not somebody else's category.
+  assert.match(VIEW, /On this server/);
+  assert.match(VIEW, /data\.local/);
+});
+
+test('⚠️ version skew is measured against the COMMON version, not the hub\'s', () => {
+  /*
+   * A hub that has not been upgraded yet would otherwise mark its entire healthy fleet as skewed,
+   * which is the fastest way to teach an operator to ignore the column.
+   */
+  assert.match(VIEW, /modal/);
+  assert.doesNotMatch(VIEW, /ourVersion|hubVersion/,
+    'skew must not be computed against this server\'s own version');
+});
+
+test('an edge with TLS verification off is surfaced, not hidden', () => {
+  // A decision somebody made once and nobody revisits unless a screen shows it.
+  assert.match(VIEW, /tlsVerify === false/);
+  assert.match(VIEW, /TLS unverified/);
+});
+
+test('⚠️ COVERAGE IS RENDERED BESIDE UPTIME, THE SAME SIZE', () => {
+  /*
+   * "99.9% uptime, 62% coverage" is honest. "99.9%" alone, computed over the 62%, tells a customer
+   * their screens were fine during a week nobody was watching them. Small print under the fold does
+   * not carry that.
+   */
+  const up = VIEW.match(/Uptime<\/div>\s*<div style="font-size:(\d+)px/);
+  const cov = VIEW.match(/Coverage<\/div>\s*<div style="font-size:(\d+)px/);
+  assert.ok(up && cov, 'both figures must be rendered');
+  assert.equal(up[1], cov[1], 'and at the same size — coverage is not a footnote');
+  assert.match(VIEW, /coverageNote/);
+});
+
+test('there is no "all clients" option in the report picker', () => {
+  // A report with no client name, mixing customers into one percentage, is the document that gets
+  // forwarded to one of those customers.
+  assert.doesNotMatch(VIEW, /All clients|value=""[^>]*>All/);
+  assert.match(VIEW, /clientId=\$\{encodeURIComponent\(state\.clientId\)\}/);
+});
+
+test('⚠️ the CSV is FETCHED with the auth header, not linked', () => {
+  /*
+   * The API is Bearer-authenticated from localStorage, so an <a href> to the endpoint would 401 —
+   * and it would 401 by REDIRECTING to login, which reads to the user as "my session expired"
+   * rather than "that link cannot carry a token".
+   */
+  assert.match(VIEW, /Authorization: `Bearer \$\{localStorage\.getItem\('token'\)\}`/);
+  assert.match(VIEW, /URL\.createObjectURL/);
+  assert.doesNotMatch(VIEW, /<a href="\/api\/mesh\/uptime\.csv/, 'never a plain link');
+});
+
+test('a truncated incident list says so', () => {
+  // A report quietly showing 50 of 300 reads as "that was all of them".
+  assert.match(VIEW, /Showing the 50 longest of/);
+  assert.match(VIEW, /CSV export contains every one/);
+});
+
+test('the view still writes nothing, across all four tabs (I2)', () => {
+  for (const verb of ['api.post', 'api.put', 'api.patch', 'api.delete']) {
+    assert.ok(!VIEW.includes(verb), `${verb} in a read-only view`);
+  }
+  // ⚠️ Including the raw fetch added for the CSV download — a GET, and it must stay one.
+  const fetches = [...VIEW.matchAll(/fetch\(([^)]*)\)/g)];
+  assert.ok(fetches.length <= 1, 'exactly one raw fetch, for the export');
+  assert.doesNotMatch(VIEW, /method: '(POST|PUT|PATCH|DELETE)'/);
+});

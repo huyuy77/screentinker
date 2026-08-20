@@ -912,6 +912,11 @@ const migrations = [
      deleted_at      INTEGER,
      PRIMARY KEY (origin_node_id, device_id)
    )`,
+  /* ⚠️ WHEN THIS HUB FIRST SAW THE SCREEN, which received_at cannot answer — the row is upserted, so
+   * received_at is always the LATEST report. Without a first-seen the uptime report has to assume
+   * every screen existed for the whole reporting window, which scores a screen installed on the 20th
+   * as broken for the first 19 days of the month. Additive; older rows fall back to received_at. */
+  'ALTER TABLE mesh_mirror_devices ADD COLUMN first_seen_at INTEGER',
 
   /* Alert events, kept as history rather than as current state — an alert that closed last week is
    * still the evidence behind last week's report. */
