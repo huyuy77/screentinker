@@ -14,6 +14,7 @@
  */
 
 const { Uplink } = require('../lib/mesh/uplink');
+const readProxy = require('../lib/mesh/read-proxy');
 const envelope = require('../lib/mesh/envelope');
 const mirror = require('../lib/mesh/mirror');
 const store = require('../lib/mesh/store');
@@ -37,8 +38,28 @@ function activeUpEdges(db) {
   }
 }
 
-/** Devices as this node knows them, already narrowed to the grant. */
-function deviceProjections(db, grantCategories) {
+/*
+ * ⚠️ THE WORKSPACE SCOPE IS ENFORCED IN THE QUERY, not filtered afterwards.
+ *
+ * A shared list that is applied after the rows are fetched leaks the moment somebody adds a count,
+ * a total or a "devices online" to a payload — the classic shape of this bug, and the same one the
+ * hub's client scoping avoids by resolving visibility before it selects. Here the SQL simply cannot
+ * return a workspace this edge was not granted.
+ *
+ * `null` means every workspace INCLUDING ones created later, which only the instance owner can
+ * choose. A named list is fixed: a workspace added tomorrow is not silently swept in.
+ */
+function scopeClause(edge, alias) {
+  const ids = edge.shared_workspaces ? store.safeParseArray(edge.shared_workspaces) : null;
+  if (!ids || !ids.length) return { sql: '', params: [] };
+  return {
+    sql: ` WHERE ${alias} IN (${ids.map(() => '?').join(',')})`,
+    params: ids,
+  };
+}
+
+/** Devices as this node knows them, already narrowed to the grant AND to the shared workspaces. */
+function deviceProjections(db, grantCategories, edge) {
   /*
    * ⚠️ Only columns that exist. The first version of this query named `hardware_model` and joined
    * device_telemetry on `created_at`; neither exists — telemetry is timestamped `reported_at`, and
@@ -50,8 +71,10 @@ function deviceProjections(db, grantCategories) {
    * projectDevice() skips anything undefined, so a field this node cannot answer is simply absent
    * rather than sent as null — the grant decides what MAY travel, the row decides what exists.
    */
+  const scope = edge ? scopeClause(edge, 'd.workspace_id') : { sql: '', params: [] };
   const rows = db.prepare(`
     SELECT d.id, d.name, d.status, d.last_heartbeat, d.app_version, d.platform, d.client_type,
+           d.workspace_id,
            t.battery_level, t.battery_charging, t.storage_free_mb, t.storage_total_mb,
            t.ram_free_mb, t.ram_total_mb, t.cpu_usage, t.wifi_rssi, t.uptime_seconds
       FROM devices d
@@ -60,8 +83,37 @@ function deviceProjections(db, grantCategories) {
       ) latest ON latest.device_id = d.id
       LEFT JOIN device_telemetry t
              ON t.device_id = latest.device_id AND t.reported_at = latest.reported_at
-  `).all();
+    ${scope.sql}
+  `).all(...scope.params);
   return rows.map((r) => mirror.projectDevice(r, grantCategories));
+}
+
+/**
+ * This server's workspaces, so a parent can present them as separate orgs.
+ *
+ * ⚠️ WITHOUT THIS, A SECOND WORKSPACE IS INVISIBLE UPSTREAM. One connected server would read as one
+ * org however many customers it actually holds, and every screen would land in the same
+ * undifferentiated list — which is wrong in the specific way that matters to an MSP, because the
+ * whole point of the hub is telling one client's estate from another's.
+ *
+ * Grant-gated on `identity` like every other name: a health-only edge learns that screens exist and
+ * how they are coping, and learns nothing about how the client organises them.
+ */
+function workspaceProjections(db, grantCategories, edge) {
+  if (!mirror.fieldsAllowedFor(grantCategories).includes('name')) return [];
+  try {
+    const scope = edge ? scopeClause(edge, 'w.id') : { sql: '', params: [] };
+    return db.prepare(`
+      SELECT w.id, w.name, o.name AS organization_name,
+             (SELECT COUNT(*) FROM devices d WHERE d.workspace_id = w.id) AS device_count
+        FROM workspaces w
+        LEFT JOIN organizations o ON o.id = w.organization_id
+      ${scope.sql}
+    `).all(...scope.params);
+  } catch (e) {
+    // An older schema, or a build without workspaces: the parent simply groups by server instead.
+    return [];
+  }
 }
 
 function nodeHealth(db, nodeId) {
@@ -77,11 +129,21 @@ function nodeHealth(db, nodeId) {
   });
 }
 
-function openAlerts(db, grantCategories) {
+function openAlerts(db, grantCategories, edge) {
   try {
+    /*
+     * ⚠️ Alerts are scoped too. An incident names a device, so an unscoped alert feed would tell a
+     * parent about screens in a workspace that was deliberately withheld — leaking by description
+     * what the workspace scope refused by row.
+     */
+    const ids = edge && edge.shared_workspaces ? store.safeParseArray(edge.shared_workspaces) : null;
+    const scoped = ids && ids.length;
     const rows = db.prepare(
-      'SELECT id, metric, severity, device_id, opened_at, closed_at FROM alert_events ' +
-      'WHERE closed_at IS NULL ORDER BY opened_at DESC LIMIT 200').all();
+      'SELECT a.id, a.metric, a.severity, a.device_id, a.opened_at, a.closed_at FROM alert_events a ' +
+      (scoped ? `LEFT JOIN devices d ON d.id = a.device_id
+                  WHERE a.closed_at IS NULL AND d.workspace_id IN (${ids.map(() => '?').join(',')}) `
+              : 'WHERE a.closed_at IS NULL ') +
+      'ORDER BY a.opened_at DESC LIMIT 200').all(...(scoped ? ids : []));
     return rows
       .map((a) => mirror.projectAlert({
         id: a.id, type: a.metric, severity: a.severity,
@@ -92,6 +154,53 @@ function openAlerts(db, grantCategories) {
   } catch (e) {
     return [];
   }
+}
+
+/**
+ * Answer a parent's read.
+ *
+ * ⚠️ THE ALLOWLIST, THE GRANT AND THE WORKSPACE SCOPE ARE ALL APPLIED HERE, on the child, in that
+ * order — because this is the side that owns the rows. A parent asking for something it may not have
+ * is refused by the party with the standing to refuse, which is the difference between a permission
+ * and a request for good manners.
+ *
+ * It returns the SAME shape the child's own API returns, so the parent can render its ordinary
+ * screens rather than a reduced summary of them. That is the whole point: an operator looking at a
+ * customer's estate should see what the customer sees, minus the ability to change it.
+ */
+function answerRead(db, edge, req) {
+  const grants = store.safeParseArray(edge.grant_categories);
+  const check = readProxy.authorize(edge, req && req.path, req && req.method, grants);
+  if (!check.ok) return { ok: false, reason: check.reason };
+
+  const shared = edge.shared_workspaces ? store.safeParseArray(edge.shared_workspaces) : null;
+
+  if (req.path === '/api/devices') {
+    /*
+     * ⚠️ Built from the same projection the mirror uses, so a field cannot travel over the proxy
+     * that would not travel over the mirror. Two paths to the same data with two different filters
+     * is how one of them ends up more generous than anybody intended.
+     */
+    const rows = deviceProjections(db, grants, edge);
+    const scoped = readProxy.scopeRows(rows, shared);
+    return { ok: true, rows: scoped, asOf: nowSec() };
+  }
+
+  if (req.path === '/api/groups') {
+    try {
+      const rows = db.prepare('SELECT id, name, workspace_id FROM device_groups').all();
+      return { ok: true, rows: readProxy.scopeRows(rows, shared), asOf: nowSec() };
+    } catch (e) { return { ok: true, rows: [], asOf: nowSec() }; }
+  }
+
+  if (req.path === '/api/playlists') {
+    try {
+      const rows = db.prepare('SELECT id, name, workspace_id FROM playlists').all();
+      return { ok: true, rows: readProxy.scopeRows(rows, shared), asOf: nowSec() };
+    } catch (e) { return { ok: true, rows: [], asOf: nowSec() }; }
+  }
+
+  return { ok: false, reason: 'That is not something this connection may read.' };
 }
 
 function startMeshUplinks(db, { config, connect, logger = console } = {}) {
@@ -117,8 +226,13 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
     // Node health always: it is this node reporting on itself, the minimum any edge exists for.
     link.send(mk('node-health', nodeHealth(db, me)));
 
-    for (const d of deviceProjections(db, grant)) link.send(mk('device-summary', d));
-    for (const a of openAlerts(db, grant)) link.send(mk('alert-event', a));
+    // Workspaces before devices, so a device arriving first never references a workspace the parent
+    // has not seen — the parent tolerates it, but the UI would flicker a screen into "unfiled" and
+    // back out again on the very first sync.
+    for (const w of workspaceProjections(db, grant, edge)) link.send(mk('workspace-summary', w));
+
+    for (const d of deviceProjections(db, grant, edge)) link.send(mk('device-summary', d));
+    for (const a of openAlerts(db, grant, edge)) link.send(mk('alert-event', a));
   }
 
   function tick() {
@@ -151,6 +265,15 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
           connect: io,
           tlsVerify: edge.tls_verify !== 0,
           logger,
+          // ⚠️ Re-read per request, so narrowing a grant or a workspace scope takes effect on the
+          // NEXT read rather than at the next restart.
+          onRead: (req) => {
+            const fresh = db.prepare('SELECT * FROM mesh_edges WHERE id = ?').get(edge.id);
+            if (!fresh || fresh.revoked_at) {
+              return { ok: false, reason: 'This connection is no longer authorised.' };
+            }
+            return answerRead(db, fresh, req);
+          },
         }).start();
         /*
          * ⚠️ REPORT AS SOON AS THE SOCKET COMES UP, not at the next tick. Otherwise a node that was
@@ -210,4 +333,7 @@ function startMeshUplinks(db, { config, connect, logger = console } = {}) {
   };
 }
 
-module.exports = { startMeshUplinks, REPORT_INTERVAL_MS, deviceProjections, nodeHealth, openAlerts };
+module.exports = {
+  startMeshUplinks, REPORT_INTERVAL_MS,
+  deviceProjections, workspaceProjections, nodeHealth, openAlerts, answerRead,
+};

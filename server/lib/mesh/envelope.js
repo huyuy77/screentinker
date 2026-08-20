@@ -31,6 +31,13 @@ const ENVELOPE_VERSION = 1;
  */
 const PAYLOAD_TYPES = Object.freeze({
   'node-health': 1,
+  /*
+   * ⚠️ A remote server's workspaces, so its orgs appear as ORGS here rather than as one lump per
+   * machine. Without it a second workspace created on a child is invisible: its screens land in the
+   * same undifferentiated list as everything else on that box, and an operator has no way to tell
+   * which customer they belong to.
+   */
+  'workspace-summary': 1,
   'device-summary': 1,
   'alert-event': 1,
   'proof-of-play': 1,

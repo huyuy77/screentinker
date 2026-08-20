@@ -253,7 +253,7 @@ test('every existing install becomes a node with zero edges (migration is a no-o
     assert.deepEqual(tables, [
       'mesh_client_access', 'mesh_clients', 'mesh_edges',
       'mesh_mirror_alerts', 'mesh_mirror_devices', 'mesh_mirror_nodes', 'mesh_mirror_play_logs',
-      'mesh_node', 'mesh_pairing_codes', 'mesh_tombstones',
+      'mesh_mirror_workspaces', 'mesh_node', 'mesh_pairing_codes', 'mesh_tombstones',
     ]);
 
     // Still empty on a fresh install: tables exist, nothing is mirrored until something is paired.

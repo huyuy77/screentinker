@@ -474,3 +474,86 @@ test('⚠️ A TOKEN EXPIRING IN A YEAR IS NOT TREATED AS EXPIRED (seconds vs mi
     assert.equal(up.lastError, null, 'no refusal at all');
   } finally { up.stop(); await hub.close(); }
 });
+
+// ===== the read-through proxy =====
+
+test('⚠️ A PARENT CAN READ THE CHILD, and gets the child\'s own shape back', async () => {
+  /*
+   * The point of reading through rather than serving the mirror: an operator looking at a customer's
+   * estate should see what the customer sees. A reduced summary makes every remote site a
+   * second-class view, and second-class views stop being trusted.
+   */
+  const hub = await parent();
+  const up = child(hub, {
+    onRead: (req) => (req.path === '/api/devices'
+      ? { ok: true, rows: [{ id: 'd1', name: 'Lobby', status: 'online' }] }
+      : { ok: false, reason: 'That is not something this connection may read.' }),
+  }).start();
+  try {
+    await waitFor(() => up.connected);
+    const answer = await hub.wired.readFrom(CHILD_ID, { path: '/api/devices', method: 'GET' });
+    assert.equal(answer.ok, true);
+    assert.equal(answer.rows[0].name, 'Lobby');
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('⚠️ A WRITE IS REFUSED BY THE CHILD, not merely unsent by the parent', async () => {
+  /*
+   * The parent may ASK; it may not TELL. If that held only because the parent never sends a write,
+   * it would be a convention — and conventions hold until somebody adds one convenient endpoint.
+   * The refusal has to come from the side that owns the rows.
+   */
+  const readProxy = require('../lib/mesh/read-proxy');
+  const hub = await parent();
+  const up = child(hub, {
+    onRead: (req) => {
+      const check = readProxy.authorize({}, req.path, req.method, ['health']);
+      return check.ok ? { ok: true, rows: [] } : { ok: false, reason: check.reason };
+    },
+  }).start();
+  try {
+    await waitFor(() => up.connected);
+    const wrote = await hub.wired.readFrom(CHILD_ID, { path: '/api/devices', method: 'DELETE' });
+    assert.equal(wrote.ok, false);
+    assert.match(wrote.reason, /can read, and cannot write/);
+
+    const sneaky = await hub.wired.readFrom(CHILD_ID, { path: '/api/devices/d1/block', method: 'GET' });
+    assert.equal(sneaky.ok, false, 'a path outside the allowlist is refused even as a GET');
+  } finally { up.stop(); await hub.close(); }
+});
+
+test('a read for a grant the edge does not hold is refused', async () => {
+  // The proxy must not be the way around the client's own decision about what travels.
+  const readProxy = require('../lib/mesh/read-proxy');
+  const check = readProxy.authorize({}, '/api/playlists', 'GET', ['health']);
+  assert.equal(check.ok, false);
+  assert.match(check.reason, /content-metadata/);
+});
+
+test('⚠️ reading a node that is NOT CONNECTED says so, rather than hanging', async () => {
+  /*
+   * A request that queues invisibly is how an operator ends up staring at a spinner and concluding
+   * the product is broken. "Not connected right now" and "refused" also need opposite responses.
+   */
+  const hub = await parent();
+  try {
+    const answer = await hub.wired.readFrom('nobody-here', { path: '/api/devices', method: 'GET' });
+    assert.equal(answer.ok, false);
+    assert.equal(answer.offline, true);
+    assert.match(answer.reason, /not connected/);
+  } finally { await hub.close(); }
+});
+
+test('the workspace scope narrows a proxied read', () => {
+  // ⚠️ Applied on the child, from the edge — never from a filter the parent passes, which would let
+  // the party that benefits from ignoring it decide whether to apply it.
+  const readProxy = require('../lib/mesh/read-proxy');
+  const rows = [
+    { id: 'a', workspace_id: 'w1' },
+    { id: 'b', workspace_id: 'w2' },
+    { id: 'c', workspace_id: null },
+  ];
+  assert.deepEqual(readProxy.scopeRows(rows, ['w1']).map((r) => r.id), ['a', 'c'],
+    'unfiled rows travel; another workspace does not');
+  assert.equal(readProxy.scopeRows(rows, null).length, 3, 'null means every workspace');
+});

@@ -166,13 +166,61 @@ function setupMeshSocket(io, deps) {
       }
     });
 
+    /*
+     * ⚠️ THE PARENT'S ONLY WAY TO ASK FOR ANYTHING, and it is held here so there is exactly one.
+     *
+     * Kept as a thin conduit: this file does not know what a device is. It hands the request to the
+     * caller, which owns both the allowlist and the data, so the decision about what may be read
+     * lives with the side that owns the rows rather than with the transport.
+     */
+    socket.on('mesh:read', (req, ack) => {
+      if (typeof ack !== 'function') return;   // a read with nowhere to reply is not a read
+      try {
+        if (!deps.onRead) return ack({ ok: false, reason: 'This node does not answer reads.' });
+        const current = deps.reloadEdge ? deps.reloadEdge(edge.id) : edge;
+        if (!current || !pairing.edgeIsActive(current, nowSeconds())) {
+          return ack({ ok: false, reason: 'This connection is no longer authorised.' });
+        }
+        Promise.resolve(deps.onRead(current, req || {}))
+          .then((r) => ack(r))
+          .catch((e) => ack({ ok: false, reason: 'Could not read that.', detail: e && e.message }));
+      } catch (e) {
+        ack({ ok: false, reason: 'Could not read that.' });
+      }
+    });
+
     socket.on('disconnect', (reason) => {
       // Not an alarm: a node going quiet is normal, and the connection view is where it shows.
       log.log(`[mesh] node ${childId} disconnected (${reason})`);
     });
   });
 
-  return { meshNs, backpressure };
+  /*
+   * ⚠️ The PARENT side of a read: find the child's live socket and ask it. Returns a rejection
+   * rather than hanging when the child is not connected — a hub whose request queues invisibly is
+   * how an operator ends up staring at a spinner and concluding the product is broken.
+   */
+  async function readFrom(childNodeId, request, timeoutMs = 10_000) {
+    for (const sock of meshNs.sockets.values()) {
+      if (sock.data && sock.data.childNodeId === childNodeId) {
+        return new Promise((resolve) => {
+          sock.timeout(timeoutMs).emit('mesh:read', request, (err, res) => {
+            if (err) return resolve({ ok: false, reason: 'That server did not answer in time.' });
+            resolve(res || { ok: false, reason: 'That server returned nothing.' });
+          });
+        });
+      }
+    }
+    return {
+      ok: false,
+      offline: true,
+      // ⚠️ Says which of the two it is. "Not connected right now" and "refused" need opposite
+      // responses from an operator, and a single generic failure tells them neither.
+      reason: 'That server is not connected right now, so its live data cannot be read.',
+    };
+  }
+
+  return { meshNs, backpressure, readFrom };
 }
 
 module.exports = setupMeshSocket;

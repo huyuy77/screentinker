@@ -98,25 +98,35 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
   if (!container) return;
 
   const local = Array.isArray(me?.accessible_workspaces) ? me.accessible_workspaces : [];
+  /*
+   * ⚠️ KEYED ON SERVER **AND** WORKSPACE. A remote server may hold several customers, and two
+   * servers will eventually hand us the same workspace id — nothing coordinates them. Keying on the
+   * workspace alone would merge two customers into one row, which is the worst available bug here.
+   */
   const remote = (remoteOrgs || []).map((o) => ({
-    id: `remote:${o.nodeId}`,
+    id: `remote:${o.nodeId}:${o.workspaceId || ''}`,
     name: o.name,
     remote: true,
     nodeId: o.nodeId,
+    workspaceId: o.workspaceId || null,
     stale: !!o.stale,
     writable: !!o.writable,
     device_count: o.deviceCount,
     /*
-     * ⚠️ The SERVER'S NAME, not the words "another server". Every remote row was subtitled the
-     * same way, which distinguishes none of them — and an MSP switching between customers is
-     * choosing among rows that all looked alike. The name is declared by the peer at pairing.
+     * ⚠️ The SERVER'S NAME, not the words "another server". Every remote row was subtitled the same
+     * way, which distinguishes none of them — and an MSP switching between customers is choosing
+     * among rows that all looked alike. The name is declared by the peer at pairing. Where the
+     * remote org has its own organisation name too, both appear: "Acme Retail · Acme HQ Server"
+     * answers "which customer" and "on which box" in one line.
      */
-    organization_name: (o.serverName || `server ${String(o.nodeId).slice(0, 8)}`) +
-                       (o.stale ? ' · not reachable' : ''),
+    organization_name: [o.organizationName, o.serverName || `server ${String(o.nodeId).slice(0, 8)}`]
+      .filter(Boolean).join(' · ') + (o.stale ? ' · not reachable' : ''),
   }));
   const list = [...local, ...remote];
   const picked = selectedRemoteOrg();
-  const currentId = picked ? `remote:${picked.nodeId}` : (me?.current_workspace_id || null);
+  const currentId = picked
+    ? `remote:${picked.nodeId}:${picked.workspaceId || ''}`
+    : (me?.current_workspace_id || null);
 
   if (list.length === 0) {
     container.classList.remove('open');
@@ -204,7 +214,8 @@ export function renderWorkspaceSwitcher(me, remoteOrgs = []) {
      * on this server — which fails later, somewhere else, as a permissions error nobody can explain.
      */
     if (String(wsId).startsWith('remote:')) {
-      const org = (remoteOrgs || []).find((o) => `remote:${o.nodeId}` === wsId);
+      const org = (remoteOrgs || []).find(
+        (o) => `remote:${o.nodeId}:${o.workspaceId || ''}` === wsId);
       if (!org) return;
       localStorage.setItem(REMOTE_ORG_KEY, JSON.stringify(org));
       window.location.reload();

@@ -42,7 +42,11 @@ function freshDb() {
       received_at INTEGER, stale_since INTEGER);
     CREATE TABLE mesh_mirror_devices (origin_node_id TEXT, device_id TEXT, name TEXT, status TEXT,
       last_heartbeat INTEGER, body TEXT DEFAULT '{}', origin_ts INTEGER, received_at INTEGER,
-      deleted_at INTEGER, first_seen_at INTEGER, PRIMARY KEY (origin_node_id, device_id));
+      deleted_at INTEGER, first_seen_at INTEGER, workspace_id TEXT,
+      PRIMARY KEY (origin_node_id, device_id));
+    CREATE TABLE mesh_mirror_workspaces (origin_node_id TEXT, workspace_id TEXT, name TEXT,
+      organization_name TEXT, device_count INTEGER, origin_ts INTEGER, received_at INTEGER,
+      deleted_at INTEGER, PRIMARY KEY (origin_node_id, workspace_id));
     CREATE TABLE mesh_mirror_alerts (id TEXT PRIMARY KEY, origin_node_id TEXT, alert_type TEXT,
       severity TEXT, subject_count INTEGER, subjects TEXT, opened_at INTEGER, closed_at INTEGER,
       origin_ts INTEGER, received_at INTEGER);

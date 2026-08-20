@@ -407,6 +407,59 @@ function renderMintPanel(host, caps) {
   });
 }
 
+/*
+ * Which of this server's workspaces travel up the new edge.
+ *
+ * ⚠️ "ALL" IS THE INSTANCE OWNER'S CHOICE ALONE, and it is worded to say what it really means:
+ * workspaces that do not exist yet are included too. Anyone else picks from the workspaces they
+ * administer — a member must not be able to expose a colleague's workspace just because they can
+ * log in to the same server.
+ */
+async function renderScopeBox(panel) {
+  const box = panel.querySelector('#scopeBox');
+  if (!box) return;
+  let data;
+  try { data = await api.get('/mesh/shareable-workspaces'); } catch (e) { box.innerHTML = ''; return; }
+
+  const list = data.workspaces || [];
+  if (!list.length) {
+    box.innerHTML = '<p style="color:var(--text-muted);font-size:12px">' +
+      'You do not administer any workspaces on this server, so there is nothing you can share.</p>';
+    return;
+  }
+
+  box.innerHTML = `
+    <div style="font-size:13px;margin-bottom:6px"><strong>What to share</strong></div>
+    ${data.canShareAll ? `
+      <label style="display:block;margin-bottom:8px;font-size:13px">
+        <input type="checkbox" id="shareAll">
+        Every workspace on this server
+        <div style="margin-left:22px;color:var(--text-muted);font-size:11px">
+          ⚠️ Includes workspaces created later. Only you can choose this.
+        </div>
+      </label>` : `
+      <p style="color:var(--text-muted);font-size:11px;margin:0 0 8px">
+        Sharing every workspace is limited to the instance owner. These are the ones you administer.
+      </p>`}
+    <div id="wsList">
+      ${list.map((w) => `
+        <label style="display:block;margin-bottom:4px;font-size:13px">
+          <input type="checkbox" data-ws="${esc(w.id)}">
+          ${esc(w.name)}${w.organization_name
+            ? ` <span style="color:var(--text-muted)">· ${esc(w.organization_name)}</span>` : ''}
+        </label>`).join('')}
+    </div>`;
+
+  // Ticking "all" disables the individual boxes rather than hiding them: the operator can still see
+  // exactly what "all" currently covers, which is the thing they are agreeing to.
+  box.querySelector('#shareAll')?.addEventListener('change', (e) => {
+    box.querySelectorAll('#wsList input[data-ws]').forEach((c) => {
+      c.disabled = e.target.checked;
+      c.parentElement.style.opacity = e.target.checked ? 0.5 : 1;
+    });
+  });
+}
+
 async function renderConnect(panel, caps) {
   const uplinks = caps.uplinks || [];
 
@@ -429,8 +482,12 @@ async function renderConnect(panel, caps) {
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input id="parentUrl" class="input" placeholder="https://hub.example.com" style="max-width:280px">
         <input id="pairCode" class="input" placeholder="pairing code" style="max-width:180px">
-        <button class="btn btn-secondary btn-sm" id="enrollBtn">Connect</button>
       </div>
+      <!-- ⚠️ WHAT GOES UP IS CHOSEN HERE, by the side giving the data. The grant says which FIELDS
+           travel; this says which WORKSPACES do, and they are different questions — an MSP watching
+           one customer's screens has no business seeing another customer on the same box. -->
+      <div id="scopeBox" style="margin-top:12px"></div>
+      <button class="btn btn-secondary btn-sm" id="enrollBtn" style="margin-top:12px">Connect</button>
       <div id="enrollOut" style="margin-top:8px"></div>
     </div>` : ''}
 
@@ -448,6 +505,11 @@ async function renderConnect(panel, caps) {
           <div style="color:var(--text-muted);font-size:12px;margin-top:4px">
             ${esc(u.parentUrl || '')}<br>
             Shares: ${esc((u.sharing || []).join(', ') || 'nothing')}<br>
+            Workspaces: ${u.sharedWorkspaces === null || u.sharedWorkspaces === undefined
+              // ⚠️ Spelled out. An empty list here would read as "nothing is shared", which is the
+              // opposite of what null means.
+              ? '<strong>all, including any created later</strong>'
+              : esc(String(u.sharedWorkspaces.length)) + ' selected'}<br>
             Last synced: ${u.lastSyncAt ? esc(hhmm(Math.floor(u.lastSyncAt / 1000))) : 'never'}
           </div>
           ${u.revoked ? '' :
@@ -456,14 +518,21 @@ async function renderConnect(panel, caps) {
         </div>`).join('')}
     </div>` : ''}`;
 
+  // The workspace picker, filled from what this user may actually offer.
+  if (caps.canEnroll) renderScopeBox(panel);
+
   panel.querySelector('#enrollBtn')?.addEventListener('click', async () => {
     const out = panel.querySelector('#enrollOut');
     out.textContent = 'Connecting…';
     try {
+      const shareAll = !!panel.querySelector('#shareAll')?.checked;
       const r = await api.post('/mesh/uplink', {
         parentUrl: panel.querySelector('#parentUrl').value,
         code: panel.querySelector('#pairCode').value,
         selfUrl: window.location.origin,
+        shareAllWorkspaces: shareAll,
+        workspaceIds: shareAll ? []
+          : [...panel.querySelectorAll('#scopeBox input[data-ws]:checked')].map((c) => c.dataset.ws),
       });
       out.innerHTML = `<span style="color:var(--text-muted)">Connected to
         <strong>${esc(r.parentName || r.parentNodeId)}</strong>.</span>`;

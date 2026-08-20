@@ -34,7 +34,44 @@ const edgeStatus = require('../lib/mesh/edge-status');
 const nowSec = () => Math.floor(Date.now() / 1000);
 const uid = () => crypto.randomUUID();
 
-/** Only the instance owner may connect this server to another one, in either direction. */
+/**
+ * Who may create an uplink.
+ *
+ * ⚠️ NOT INSTANCE-OWNER-ONLY ANY MORE, deliberately. A workspace owner should be able to put THEIR
+ * workspace under an MSP's hub without the instance owner brokering every relationship — that is the
+ * ordinary case in a multi-tenant install, and requiring an escalation for it means it gets done by
+ * sharing an admin login instead, which is worse.
+ *
+ * The blast radius is bounded by the scope check below: whatever they pair, only workspaces they
+ * administer travel up, and "all workspaces" stays the instance owner's alone.
+ *
+ * ⚠️ THE RESIDUAL RISK IS OUTBOUND, NOT INBOUND. Creating an uplink makes this server dial an
+ * address the user typed, so a workspace admin can now cause outbound connections from inside the
+ * network. normalizeParentUrl() constrains the scheme and rejects embedded credentials, but it does
+ * not and cannot restrict the host — an operator's own hub is frequently on a private address, so a
+ * blocklist would break the main use case. Worth an allowlist if this is ever exposed to
+ * lower-trust roles.
+ */
+function requireCanShareSomething(db) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(403).json({ error: 'Not permitted.' });
+    if (req.user.role === 'platform_admin') return next();
+    let count = 0;
+    try {
+      count = db.prepare(`SELECT COUNT(*) AS c FROM workspace_members
+                           WHERE user_id = ? AND role IN ('owner','admin')`).get(req.user.id).c;
+    } catch (e) { count = 0; }
+    if (!count) {
+      return res.status(403).json({
+        error: 'You do not administer any workspace on this server, so there is nothing you could ' +
+               'share with another one.',
+      });
+    }
+    return next();
+  };
+}
+
+/** Minting a code — accepting an observer — stays an instance-level act. */
 function requireInstanceOwner(req, res, next) {
   if (!req.user || req.user.role !== 'platform_admin') {
     return res.status(403).json({
@@ -284,6 +321,36 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
    * live in the environment, and a bundled duplicate drifts the moment somebody changes one — then
    * the UI offers an action that 404s, which is worse than not offering it.
    */
+  /**
+   * The workspaces this user could offer to a parent.
+   *
+   * ⚠️ SCOPED TO WHAT THEY ADMINISTER, except for the instance owner. A workspace member pairing a
+   * server must not be able to hand a stranger a workspace they merely have login for — that is a
+   * privilege escalation wearing the clothes of a convenience, and it is invisible afterwards
+   * because the resulting edge looks exactly like a legitimate one.
+   */
+  router.get('/shareable-workspaces', requireAuth, (req, res) => {
+    const isOwner = req.user && req.user.role === 'platform_admin';
+    try {
+      const rows = isOwner
+        ? db.prepare(`SELECT w.id, w.name, o.name AS organization_name
+                        FROM workspaces w LEFT JOIN organizations o ON o.id = w.organization_id`).all()
+        : db.prepare(`SELECT w.id, w.name, o.name AS organization_name
+                        FROM workspaces w
+                        LEFT JOIN organizations o ON o.id = w.organization_id
+                        JOIN workspace_members m ON m.workspace_id = w.id
+                       WHERE m.user_id = ? AND m.role IN ('owner','admin')`).all(req.user.id);
+      res.json({
+        workspaces: rows,
+        // ⚠️ Only the instance owner may say "all", including workspaces created LATER. Everyone
+        // else names a fixed set, so a future workspace is never silently included.
+        canShareAll: isOwner,
+      });
+    } catch (e) {
+      res.json({ workspaces: [], canShareAll: isOwner });
+    }
+  });
+
   router.get('/capabilities', requireAuth, (req, res) => {
     const rows = db.prepare("SELECT * FROM mesh_edges WHERE direction = 'up'").all();
     res.json({
@@ -297,6 +364,9 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
         parentName: e.peer_name || null,
         parentUrl: e.peer_url,
         sharing: store.safeParseArray(e.grant_categories),
+        // ⚠️ null means every workspace, including ones created later. Spelled out rather than
+        // rendered as an empty list, which would read as "nothing is shared".
+        sharedWorkspaces: e.shared_workspaces ? store.safeParseArray(e.shared_workspaces) : null,
         lastSyncAt: e.last_sync_at ? e.last_sync_at * 1000 : null,
         revoked: !!e.revoked_at,
       })),
@@ -320,7 +390,7 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
   });
 
   if (config.meshAllowUplink) {
-    router.post('/uplink', requireAuth, requireInstanceOwner, async (req, res) => {
+    router.post('/uplink', requireAuth, requireCanShareSomething(db), async (req, res) => {
       const parsed = normalizeParentUrl(req.body && req.body.parentUrl);
       if (!parsed.ok) return res.status(400).json({ error: parsed.reason });
       const code = pairing.normalizeCode(req.body && req.body.code);
@@ -329,6 +399,47 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
       const me = thisNode();
       const version = require('../package.json').version;
       const tlsVerify = req.body.tlsVerify !== false;
+
+      /*
+       * ⚠️ THE SCOPE IS VALIDATED HERE, AGAINST WHAT THIS USER ADMINISTERS. Sending a list from the
+       * browser is a request, not a decision — a non-owner naming a workspace they do not administer
+       * must be refused rather than trimmed, because silently narrowing means the operator believes
+       * they shared something they did not, and finds out when a report is empty.
+       */
+      const isOwner = req.user.role === 'platform_admin';
+      const shareAll = req.body.shareAllWorkspaces === true;
+      if (shareAll && !isOwner) {
+        return res.status(403).json({
+          error: 'Only the instance owner can share every workspace on this server. Choose the ' +
+                 'workspaces you administer instead.',
+        });
+      }
+      let sharedWorkspaces = null;   // ⚠️ null means ALL — see the column comment.
+      if (!shareAll) {
+        const asked = Array.isArray(req.body.workspaceIds) ? req.body.workspaceIds.map(String) : [];
+        if (!asked.length) {
+          return res.status(400).json({
+            error: 'Choose at least one workspace to share, or share all of them.',
+          });
+        }
+        let allowed = [];
+        try {
+          allowed = isOwner
+            ? db.prepare('SELECT id FROM workspaces').all().map((w) => w.id)
+            : db.prepare(`SELECT w.id FROM workspaces w
+                            JOIN workspace_members m ON m.workspace_id = w.id
+                           WHERE m.user_id = ? AND m.role IN ('owner','admin')`)
+                .all(req.user.id).map((w) => w.id);
+        } catch (e) { allowed = []; }
+        const refused = asked.filter((id) => !allowed.includes(id));
+        if (refused.length) {
+          return res.status(403).json({
+            error: `You do not administer ${refused.length} of the workspaces you selected, so they ` +
+                   `cannot be shared. Ask their owner to pair, or select only your own.`,
+          });
+        }
+        sharedWorkspaces = asked;
+      }
 
       let answer;
       try {
@@ -355,10 +466,12 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
 
       db.prepare(`INSERT INTO mesh_edges
           (id, peer_node_id, direction, role_capabilities, grant_categories, transport_direction,
-           tls_verify, peer_version, up_token, client_id, created_at, peer_url, peer_name)
-          VALUES (?,?,'up',?,?,'we-dial',?,?,?,NULL,?,?,?)
+           tls_verify, peer_version, up_token, client_id, created_at, peer_url, peer_name,
+           shared_workspaces)
+          VALUES (?,?,'up',?,?,'we-dial',?,?,?,NULL,?,?,?,?)
           ON CONFLICT(peer_node_id, direction) DO UPDATE SET
-            peer_name        = excluded.peer_name,
+            peer_name         = excluded.peer_name,
+            shared_workspaces = excluded.shared_workspaces,
             grant_categories = excluded.grant_categories,
             up_token         = excluded.up_token,
             peer_url         = excluded.peer_url,
@@ -366,7 +479,8 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
             revoked_at       = NULL`).run(
         uid(), answer.parentNodeId,
         JSON.stringify(answer.capabilities || []), JSON.stringify(answer.grant || []),
-        tlsVerify ? 1 : 0, null, answer.edgeToken, nowSec(), parsed.url, answer.parentName || null);
+        tlsVerify ? 1 : 0, null, answer.edgeToken, nowSec(), parsed.url, answer.parentName || null,
+        sharedWorkspaces ? JSON.stringify(sharedWorkspaces) : null);
 
       if (typeof onUplinkChanged === 'function') onUplinkChanged();
       res.json({
@@ -383,7 +497,11 @@ module.exports = function meshEnrollRoutes(db, { requireAuth, config, onUplinkCh
    * Sever, from below. ⚠️ NOT gated on meshAllowUplink — see the note on GET above. Turning the flag
    * off must never be able to strand a node in a link it cannot cut.
    */
-  router.delete('/uplink/:id', requireAuth, requireInstanceOwner, (req, res) => {
+  /*
+   * ⚠️ Severing is deliberately available to anyone who could have created one. A link you can make
+   * but cannot cut is the shape of the problem consent-from-below exists to prevent.
+   */
+  router.delete('/uplink/:id', requireAuth, requireCanShareSomething(db), (req, res) => {
     const edge = db.prepare("SELECT * FROM mesh_edges WHERE id = ? AND direction = 'up'").get(req.params.id);
     if (!edge) return res.status(404).json({ error: 'No such connection.' });
     db.prepare('UPDATE mesh_edges SET revoked_at = ?, up_token = NULL WHERE id = ?')

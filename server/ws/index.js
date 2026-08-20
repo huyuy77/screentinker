@@ -54,6 +54,14 @@ module.exports = function setupWebSockets(io) {
             }
           },
         });
+        /*
+         * ⚠️ Published so the HTTP layer can ask a child for its live data. The socket is the only
+         * path: the child dialled out because it may have no inbound route at all, which is the
+         * deployment shape this feature exists for.
+         */
+        if (meshNs && meshNs.readFrom) {
+          global.__meshReadFrom = meshNs.readFrom;
+        }
         console.log(`[mesh] listening for child nodes as ${thisNodeId}`);
       }
     } catch (e) {

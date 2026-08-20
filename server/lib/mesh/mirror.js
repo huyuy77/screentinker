@@ -45,6 +45,13 @@ const FIELD_CATEGORY = Object.freeze({
 
   // identity
   name: 'identity',
+  /*
+   * ⚠️ WHICH WORKSPACE A SCREEN BELONGS TO IS IDENTITY, and it degrades the same way. With the
+   * grant, remote workspaces appear as separate orgs and each screen files under the right one.
+   * Without it you get one flat pool per server — which is the honest degradation, not a bug: the
+   * grouping reveals how a client organises their estate, and that is theirs to withhold.
+   */
+  workspace_id: 'identity',
   hardware_model: 'identity',
   hardware_serial: 'identity',
   app_version: 'identity',

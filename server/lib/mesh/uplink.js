@@ -53,7 +53,8 @@ class Uplink extends EventEmitter {
    * @param {boolean} [opts.tlsVerify=true]
    */
   constructor({ parentUrl, edgeToken, nodeId, connect, tlsVerify = true,
-                bufferMax = DEFAULT_BUFFER_MAX, rand = Math.random, logger = console }) {
+                bufferMax = DEFAULT_BUFFER_MAX, rand = Math.random, logger = console,
+                onRead = null }) {
     super();
     if (!parentUrl) throw new Error('An uplink needs a parent URL. There is no default address.');
     if (!edgeToken) throw new Error('An uplink needs an edge token.');
@@ -67,6 +68,9 @@ class Uplink extends EventEmitter {
     this.bufferMax = bufferMax;
     this.rand = rand;
     this.log = logger;
+    // Optional: with no handler the child simply refuses every read, which is the correct default
+    // for a node that has not opted into being readable.
+    this.onRead = onRead;
 
     this.socket = null;
     this.connected = false;
@@ -103,6 +107,24 @@ class Uplink extends EventEmitter {
       // Per-edge opt-out for self-signed certs on-prem. On by default and visible in the UI, never
       // buried — an operator who turned this off should be able to see that they did.
       rejectUnauthorized: this.tlsVerify,
+    });
+
+    /*
+     * ⚠️ THE PARENT MAY ASK; IT MAY NOT TELL. This is the only inbound handler on the child, and the
+     * decision about what it will answer is made by the owner of the data (services/mesh-uplink.js
+     * via lib/mesh/read-proxy.js), not here. Keeping the transport ignorant of the policy is what
+     * stops a future "just add this one endpoint" from quietly widening it.
+     */
+    this.socket.on('mesh:read', (req, ack) => {
+      if (typeof ack !== 'function') return;
+      if (!this.onRead) return ack({ ok: false, reason: 'This node does not answer reads.' });
+      try {
+        Promise.resolve(this.onRead(req || {}))
+          .then((r) => ack(r))
+          .catch(() => ack({ ok: false, reason: 'Could not read that.' }));
+      } catch (e) {
+        ack({ ok: false, reason: 'Could not read that.' });
+      }
     });
 
     this.socket.on('connect', () => {

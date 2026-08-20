@@ -43,15 +43,35 @@ function upsertNodeHealth(db, { edgeId, originNodeId, body, originTs, receivedAt
  * grant sends no name, so `name` is NULL and that device is un-searchable by name — a documented
  * consequence of the grant, and the empty state has to say so or it reads as a broken search.
  */
+function upsertWorkspace(db, { originNodeId, body, originTs, receivedAt }) {
+  if (!body || !body.id) return false;
+  db.prepare(`
+    INSERT INTO mesh_mirror_workspaces
+      (origin_node_id, workspace_id, name, organization_name, device_count, origin_ts, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(origin_node_id, workspace_id) DO UPDATE SET
+      name              = excluded.name,
+      organization_name = excluded.organization_name,
+      device_count      = excluded.device_count,
+      origin_ts         = excluded.origin_ts,
+      received_at       = excluded.received_at,
+      -- A workspace that reports again is not deleted, whatever a stale tombstone said.
+      deleted_at        = NULL
+  `).run(originNodeId, body.id, body.name ?? null, body.organization_name ?? null,
+         body.device_count ?? null, originTs ?? null, receivedAt);
+  return true;
+}
+
 function upsertDevice(db, { originNodeId, body, originTs, receivedAt }) {
   if (!body || !body.id) return false;
   db.prepare(`
     INSERT INTO mesh_mirror_devices
       (origin_node_id, device_id, name, status, last_heartbeat, body, origin_ts, received_at,
-       first_seen_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       first_seen_at, workspace_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(origin_node_id, device_id) DO UPDATE SET
       name           = excluded.name,
+      workspace_id   = excluded.workspace_id,
       status         = excluded.status,
       last_heartbeat = excluded.last_heartbeat,
       body           = excluded.body,
@@ -67,7 +87,7 @@ function upsertDevice(db, { originNodeId, body, originTs, receivedAt }) {
       -- drop the whole existing fleet out of the first report anybody ran.
   `).run(originNodeId, body.id, body.name ?? null, body.status ?? null,
          body.last_heartbeat ?? null, JSON.stringify(body), originTs ?? null, receivedAt,
-         receivedAt);
+         receivedAt, body.workspace_id ?? null);
   return true;
 }
 
@@ -111,6 +131,7 @@ function storeEnvelope(db, edge, env, now) {
                 originTs: env.origin_ts ? Math.floor(env.origin_ts / 1000) : null, receivedAt };
   switch (env.type) {
     case 'node-health':    upsertNodeHealth(db, ctx); return 'node-health';
+    case 'workspace-summary': return upsertWorkspace(db, ctx) ? 'workspace-summary' : null;
     case 'device-summary': return upsertDevice(db, ctx) ? 'device-summary' : null;
     case 'alert-event':    return upsertAlert(db, ctx) ? 'alert-event' : null;
     case 'proof-of-play':  return insertPlayLog(db, ctx) ? 'proof-of-play' : null;

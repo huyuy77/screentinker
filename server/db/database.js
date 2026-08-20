@@ -750,6 +750,18 @@ const migrations = [
    * side stores it, so the switcher can read "Acme HQ" where it used to read "another server". */
   'ALTER TABLE mesh_edges ADD COLUMN peer_name TEXT',
 
+  /* WHICH of this server's workspaces travel up this edge. JSON array of workspace ids, or NULL.
+   *
+   * ⚠️ NULL MEANS ALL, AND THAT IS ONLY CHOOSABLE BY THE INSTANCE OWNER. Anyone else must name the
+   * workspaces they are sharing, and may only name ones they actually administer — otherwise a
+   * member of one workspace could expose a colleague's by pairing a server they happen to have
+   * login for, which is a privilege escalation dressed up as a convenience.
+   *
+   * ⚠️ Deliberately NOT the empty array as the default. `[]` and NULL would both read as falsy in
+   * every naive check, one meaning "share nothing" and the other "share everything" — opposite
+   * outcomes behind the same truthiness test is how a grant becomes accidentally total. */
+  'ALTER TABLE mesh_edges ADD COLUMN shared_workspaces TEXT',
+
   /* This server's OWN friendly name, which is what it declares when pairing. Defaults to the host
    * name because that is the thing an operator already recognises; editable, because hostnames are
    * frequently neither stable nor meaningful. */
@@ -965,6 +977,33 @@ const migrations = [
    * every screen existed for the whole reporting window, which scores a screen installed on the 20th
    * as broken for the first 19 days of the month. Additive; older rows fall back to received_at. */
   'ALTER TABLE mesh_mirror_devices ADD COLUMN first_seen_at INTEGER',
+
+  /* A remote server's workspaces, mirrored so its orgs can appear as ORGS here.
+   *
+   * ⚠️ KEYED BY (origin_node_id, workspace_id), NOT by workspace_id alone. Two servers will
+   * eventually hand us the same workspace id — they are generated independently and nothing
+   * coordinates them — and a single-column key would silently merge two customers' estates into one
+   * row set, which is unrecoverable after the fact. The pair is the identity.
+   *
+   * The name is nullable because it arrives only with an `identity` grant; a health-only edge
+   * mirrors the structure without the labels, and the UI says "unnamed workspace" rather than
+   * inventing one. */
+  `CREATE TABLE IF NOT EXISTS mesh_mirror_workspaces (
+     origin_node_id    TEXT NOT NULL,
+     workspace_id      TEXT NOT NULL,
+     name              TEXT,
+     organization_name TEXT,
+     device_count      INTEGER,
+     origin_ts         INTEGER,
+     received_at       INTEGER NOT NULL,
+     deleted_at        INTEGER,
+     PRIMARY KEY (origin_node_id, workspace_id)
+   )`,
+
+  /* ⚠️ Which workspace a mirrored screen belongs to, so screens file under the right remote org.
+   * Nullable: a health-only grant does not carry it, and a child on an older build never sends it —
+   * both cases degrade to one flat list per server rather than to a wrong grouping. */
+  'ALTER TABLE mesh_mirror_devices ADD COLUMN workspace_id TEXT',
 
   /* Alert events, kept as history rather than as current state — an alert that closed last week is
    * still the evidence behind last week's report. */

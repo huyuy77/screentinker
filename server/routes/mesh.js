@@ -160,43 +160,94 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     if (!ids.length) return res.json({ orgs: [] });
 
     const marks = ids.map(() => '?').join(',');
-    const counts = new Map(db.prepare(
-      `SELECT origin_node_id,
+    const mirrorStore = require('../lib/mesh/mirror-store');
+
+    /*
+     * ⚠️ ONE ORG PER REMOTE WORKSPACE, falling back to one per server.
+     *
+     * A connected server may hold several customers. Presenting it as a single org was wrong in the
+     * exact way that matters to an MSP: every screen from that box landed in one undifferentiated
+     * list, so the hub could not tell one client's estate from another's — which is the entire job.
+     *
+     * The fallback is not a degraded mode to apologise for. A health-only grant deliberately carries
+     * no names, and a child on an older build sends no workspaces at all; both then read as one org
+     * for that server, which is the honest summary of what we actually know rather than a guess at
+     * structure we were not told.
+     */
+    const workspaces = db.prepare(
+      `SELECT * FROM mesh_mirror_workspaces
+        WHERE origin_node_id IN (${marks}) AND deleted_at IS NULL`).all(...ids);
+
+    const deviceCounts = db.prepare(
+      `SELECT origin_node_id, workspace_id,
               COUNT(*) AS total,
               SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) AS online
          FROM mesh_mirror_devices
         WHERE origin_node_id IN (${marks}) AND deleted_at IS NULL
-        GROUP BY origin_node_id`).all(...ids).map((r) => [r.origin_node_id, r]));
+        GROUP BY origin_node_id, workspace_id`).all(...ids);
 
-    res.json({
-      orgs: ids.map((id) => {
-        const edge = edgeFor(id);
-        const client = edge && edge.client_id
-          ? db.prepare('SELECT name FROM mesh_clients WHERE id = ?').get(edge.client_id) : null;
-        const c = counts.get(id) || { total: 0, online: 0 };
-        const fresh = require('../lib/mesh/mirror-store').freshnessOf(edge, now);
-        return {
-          nodeId: id,
-          clientId: edge ? edge.client_id : null,
-          name: (client && client.name) || edge?.peer_name || `Server ${String(id).slice(0, 8)}`,
-          /*
-           * ⚠️ The SERVER's own name, separate from the client it is filed under. The switcher used
-           * to sub-title every remote org "another server", which is true of all of them and so
-           * distinguishes none of them — and a node id distinguishes them only in principle. The
-           * peer declares this when it pairs.
-           */
-          serverName: (edge && edge.peer_name) || null,
+    const countFor = (nodeId, wsId) => deviceCounts.find(
+      (c) => c.origin_node_id === nodeId && (wsId ? c.workspace_id === wsId : true)) || { total: 0, online: 0 };
+    const nodeTotals = new Map();
+    for (const c of deviceCounts) {
+      const t = nodeTotals.get(c.origin_node_id) || { total: 0, online: 0 };
+      t.total += c.total; t.online += (c.online || 0);
+      nodeTotals.set(c.origin_node_id, t);
+    }
+
+    const orgs = [];
+    for (const id of ids) {
+      const edge = edgeFor(id);
+      const client = edge && edge.client_id
+        ? db.prepare('SELECT name FROM mesh_clients WHERE id = ?').get(edge.client_id) : null;
+      const fresh = mirrorStore.freshnessOf(edge, now);
+      const serverName = (edge && edge.peer_name) || null;
+      const mine = workspaces.filter((w) => w.origin_node_id === id);
+
+      const base = {
+        nodeId: id,
+        clientId: edge ? edge.client_id : null,
+        /*
+         * ⚠️ The SERVER's own name, separate from the client it is filed under and from the
+         * workspace. The switcher used to sub-title every remote org "another server", which is true
+         * of all of them and so distinguishes none.
+         */
+        serverName,
+        stale: fresh === 'stale',
+        // Honest state of the feature, sent rather than assumed: readable, not yet writable.
+        writable: false,
+      };
+
+      if (!mine.length) {
+        const t = nodeTotals.get(id) || { total: 0, online: 0 };
+        orgs.push({
+          ...base,
+          workspaceId: null,
+          name: (client && client.name) || serverName || `Server ${String(id).slice(0, 8)}`,
+          deviceCount: t.total,
+          // ⚠️ null when the link is stale, never 0 — "0 online" is a claim that the site is dark.
+          devicesOnline: fresh === 'stale' ? null : t.online,
+          // So the UI can say WHY a server shows as one org instead of several.
+          grouping: 'server',
+        });
+        continue;
+      }
+
+      for (const w of mine) {
+        const c = countFor(id, w.workspace_id);
+        orgs.push({
+          ...base,
+          workspaceId: w.workspace_id,
+          name: w.name || `Unnamed workspace ${String(w.workspace_id).slice(0, 6)}`,
+          organizationName: w.organization_name || null,
           deviceCount: c.total,
-          // ⚠️ null when the link is stale, never 0 — see the note on nodeRollup. A remote org
-          // showing "0 online" in a switcher is a claim that the site is dark.
           devicesOnline: fresh === 'stale' ? null : (c.online || 0),
-          stale: fresh === 'stale',
-          // The honest state of the feature, sent rather than assumed by the client: this server
-          // can read the org but cannot yet write to it.
-          writable: false,
-        };
-      }),
-    });
+          grouping: 'workspace',
+        });
+      }
+    }
+
+    res.json({ orgs });
   });
 
   /** GET /api/mesh/devices — the aggregated cross-node screens view. */
@@ -386,6 +437,44 @@ module.exports = function meshRoutes(db, { requireAuth }) {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="uptime-${stem}-${day}.csv"`);
     res.send(meshUptime.toCsv(out.report));
+  });
+
+  /**
+   * GET /api/mesh/read/:nodeId?path=/api/devices — a child's own live data, read through.
+   *
+   * ⚠️ THE PARENT MAY ASK, AND CANNOT TELL. The path is passed to the child, which owns the
+   * allowlist and refuses anything outside it — the decision belongs to the side holding the rows,
+   * not the side that wants them. This route deliberately does no allowlisting of its own beyond
+   * refusing an obviously absent path: duplicating the list here would create two copies to keep in
+   * step, and the copy that matters is the child's.
+   *
+   * ⚠️ SCOPED BEFORE IT ASKS. A caller may only read through to a node they can already see, so the
+   * proxy cannot become a way around the client scoping that governs everything else here.
+   */
+  router.get('/read/:nodeId', requireAuth, async (req, res) => {
+    const ids = visibleNodeIds(req.user);
+    if (!ids.includes(req.params.nodeId)) {
+      // 404 rather than 403: whether a node exists is not something an unauthorised caller learns.
+      return res.status(404).json({ error: 'No such server.' });
+    }
+    const readFrom = global.__meshReadFrom;
+    if (!readFrom) {
+      return res.status(503).json({ error: 'This server is not accepting connections from others.' });
+    }
+    const answer = await readFrom(req.params.nodeId, {
+      path: String(req.query.path || ''),
+      method: 'GET',
+    });
+    if (!answer || !answer.ok) {
+      /*
+       * ⚠️ 503 when the child is merely offline, 403 when it refused. They read the same to a naive
+       * client and mean opposite things: one is "try again shortly", the other is "this will never
+       * work until somebody changes a grant".
+       */
+      return res.status(answer && answer.offline ? 503 : 403)
+        .json({ error: (answer && answer.reason) || 'That server did not answer.' });
+    }
+    res.json(answer);
   });
 
   /** GET /api/mesh/topology — the graph, for the topology view. */

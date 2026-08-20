@@ -612,51 +612,82 @@ async function createWallFromSelection() {
 async function loadRemoteDashboard(org) {
   const main = document.getElementById('groupedDevices');
   if (!main) return;
-  let data;
-  try {
-    data = await api.get(`/mesh/devices?limit=200`);
-  } catch (e) {
-    main.innerHTML = `<div class="empty-state"><h3>Could not reach that server's data</h3><p>${esc(e.message)}</p></div>`;
-    return;
-  }
-  const rows = (data.devices || []).filter((d) => d.originNodeId === org.nodeId);
 
-  const STATUS = { live: ['#22c55e', 'Online'], down: ['#ef4444', 'Offline'],
-                   stale: ['#f59e0b', 'Last known'], unknown: ['#94a3b8', 'Not reported'] };
-  const age = (s) => (s == null ? '' : s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago`
-                   : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`);
+  /*
+   * ⚠️ THE SAME CARDS AS A LOCAL SERVER, read through to the machine that owns them.
+   *
+   * The first version drew a reduced table, on the reasoning that the local renderer assumes it can
+   * act on every row. That reasoning was about the RENDERER; the operator's need is the opposite —
+   * a customer's estate should look like an estate, not like a report about one, or every remote
+   * site becomes a second-class view nobody trusts.
+   *
+   * So the rows come from the child's own /api/devices over the mesh socket, in the child's own
+   * shape, and go through renderDeviceCard() unchanged. What is removed is the ABILITY to act, not
+   * the appearance of it — see below.
+   */
+  let rows = null;
+  let liveError = null;
+  try {
+    const r = await api.get(`/mesh/read/${encodeURIComponent(org.nodeId)}?path=/api/devices`);
+    rows = r.rows || [];
+  } catch (e) {
+    liveError = e.message || 'that server did not answer';
+  }
+
+  /*
+   * ⚠️ FALLS BACK TO THE MIRROR WHEN THE CHILD IS OFFLINE, and says which it is showing. A live read
+   * fails whenever the site's link is down — which is exactly when somebody is looking — and an
+   * empty page then reads as "the customer has no screens" rather than "we cannot reach them right
+   * now". The mirror is last-known by definition, so it must never be presented as current.
+   */
+  if (rows === null) {
+    try {
+      const m = await api.get('/mesh/devices?limit=200');
+      rows = (m.devices || [])
+        .filter((d) => d.originNodeId === org.nodeId
+          && (!org.workspaceId || (d.body && d.body.workspace_id) === org.workspaceId))
+        .map((d) => ({ ...(d.body || {}), id: d.deviceId, name: d.name,
+                       status: d.status === 'live' ? 'online' : 'offline' }));
+    } catch (e) { rows = []; }
+  }
+
+  const scoped = rows.filter((d) => !org.workspaceId || d.workspace_id === org.workspaceId);
 
   main.innerHTML = `
-    <div class="table-wrap">
-      <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:520px">
-        <thead><tr style="border-bottom:1px solid var(--border)">
-          <th style="padding:8px;text-align:left;color:var(--text-muted)">Screen</th>
-          <th style="padding:8px;text-align:left;color:var(--text-muted)">Status</th>
-          <th style="padding:8px;text-align:left;color:var(--text-muted)">As of</th>
-        </tr></thead>
-        <tbody>
-          ${rows.map((d) => {
-            const [dot, label] = STATUS[d.status] || STATUS.unknown;
-            return `
-            <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:8px">${d.name ? esc(d.name)
-                // A health-only grant sends no name; saying so beats a blank that reads as a bug.
-                : '<span style="color:var(--text-muted);font-style:italic">not shared</span>'}</td>
-              <td style="padding:8px">
-                <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot};margin-right:6px"></span>${label}</td>
-              <!-- ⚠️ Every remote row carries its age. A green dot from ninety minutes ago is a lie
-                   by omission, and this list is the one people scan fastest. -->
-              <td style="padding:8px;color:var(--text-muted);font-size:12px">${esc(age(d.asOfAgeSec))}</td>
-            </tr>`;
-          }).join('') || `<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text-muted)">No screens shared from this server.</td></tr>`}
-        </tbody>
-      </table>
+    ${liveError ? `
+      <div style="border-left:3px solid var(--warning,#f59e0b);background:var(--bg-card);
+                  padding:8px 12px;margin-bottom:12px;font-size:12px">
+        Showing the last state this server received — ${esc(liveError)}
+      </div>` : ''}
+    <div class="device-grid">
+      ${scoped.map(renderDeviceCard).join('') ||
+        `<div style="color:var(--text-muted);font-size:13px;padding:8px 12px">No screens shared from this server.</div>`}
     </div>`;
 
+  frameCardScreenshots();
+
+  /*
+   * ⚠️ THE ACTIONS ARE REMOVED FROM THE DOM, not disabled and not merely left unwired.
+   *
+   * A disabled control still tells the operator the feature exists here and is broken; an unwired
+   * one is worse, because it looks live and does nothing. Deleting the select checkbox and the drag
+   * handle means the page reads as "this is somebody else's" without a single "you cannot do that"
+   * message — and there is no handler left to reach even if a stale listener fired.
+   *
+   * The card itself still opens the device, because looking is the whole point.
+   */
+  main.querySelectorAll('.device-card').forEach((card) => {
+    card.removeAttribute('draggable');
+    card.querySelector('.device-card-select')?.remove();
+    // Local cards navigate to a local device route that does not exist for a remote screen.
+    card.removeAttribute('onclick');
+    card.style.cursor = 'default';
+  });
+
   const stat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  stat('statTotal', rows.length);
-  stat('statOnline', rows.filter((d) => d.status === 'live').length);
-  stat('statOffline', rows.filter((d) => d.status === 'down').length);
+  stat('statTotal', scoped.length);
+  stat('statOnline', scoped.filter((d) => d.status === 'online').length);
+  stat('statOffline', scoped.filter((d) => d.status !== 'online').length);
 }
 
 async function loadDashboard() {

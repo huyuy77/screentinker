@@ -347,25 +347,77 @@ test('⚠️ remote screens render on a SEPARATE path from local ones', () => {
   assert.match(DASHBOARD, /async function loadRemoteDashboard/);
 });
 
-test('the remote screen list carries an age and offers no actions', () => {
+test('⚠️ a remote org renders THE SAME CARDS as a local one', () => {
+  /*
+   * The first version drew a reduced table, reasoning that the local renderer assumes it can act on
+   * every row. That was a fact about the renderer, not about the need: a customer's estate should
+   * look like an estate, or every remote site becomes a second-class view nobody trusts. The rows
+   * come from the child's own API, in the child's own shape, through renderDeviceCard() unchanged.
+   */
   const fn = DASHBOARD.slice(DASHBOARD.indexOf('async function loadRemoteDashboard'),
                              DASHBOARD.indexOf('async function loadDashboard'));
   assert.ok(fn.length > 100, 'the remote renderer must exist');
-  assert.match(fn, /asOfAgeSec/, 'every remote row shows how old it is');
-  assert.doesNotMatch(fn, /requestScreenshot|draggable|device-select-cb/,
-    'and offers none of the local actions, because none of them can reach that server');
+  assert.match(fn, /renderDeviceCard/, 'the same card renderer as local screens');
+  assert.match(fn, /class="device-grid"/, 'in the same grid');
+  assert.match(fn, /\/mesh\/read\/\$\{encodeURIComponent\(org\.nodeId\)\}\?path=\/api\/devices/,
+    'read through to the server that owns them');
 });
 
-test('⚠️ leaving a remote org does not require a workspace SWITCH', () => {
+test('⚠️ the ACTIONS are removed from the DOM, not disabled', () => {
   /*
-   * While a remote org is selected, currentId is `remote:…`, so picking your own workspace looks
-   * like a change — but the token already points at it. Asking the server to switch to the
-   * workspace it is already on returns no new token, so the click did nothing and the local
-   * workspace was unselectable for as long as a remote org was active.
+   * A disabled control still says the feature exists here and is broken; an unwired one is worse,
+   * because it looks live and does nothing. Deleting them means the page reads as somebody else's
+   * without a single "you cannot do that" message, and no stale listener has anything to reach.
    */
-  assert.match(SWITCHER, /const wasRemote = !!picked;/);
-  assert.match(SWITCHER, /if \(wasRemote && wsId === \(me\?\.current_workspace_id\)\)[\s\S]{0,80}reload/,
-    'dropping the mode IS the whole action in that case');
-  assert.match(SWITCHER, /clearRemoteOrg\(\);[\s\S]{0,200}window\.location\.reload/,
-    'and the mode is cleared BEFORE the reload, so local data never renders under the remote banner');
+  const fn = DASHBOARD.slice(DASHBOARD.indexOf('async function loadRemoteDashboard'),
+                             DASHBOARD.indexOf('async function loadDashboard'));
+  assert.match(fn, /removeAttribute\('draggable'\)/);
+  assert.match(fn, /\.device-card-select'\)\?\.remove\(\)/);
+  assert.match(fn, /removeAttribute\('onclick'\)/,
+    'the local device route does not exist for a remote screen');
+});
+
+test('⚠️ an offline server falls back to the mirror AND SAYS SO', () => {
+  /*
+   * A live read fails exactly when the site's link is down — which is when somebody is looking. An
+   * empty page then reads as "this customer has no screens" rather than "we cannot reach them right
+   * now", and the mirror is last-known by definition, so it must never be presented as current.
+   */
+  const fn = DASHBOARD.slice(DASHBOARD.indexOf('async function loadRemoteDashboard'),
+                             DASHBOARD.indexOf('async function loadDashboard'));
+  assert.match(fn, /if \(rows === null\)/, 'the fallback is on the live read failing');
+  assert.match(fn, /Showing the last state this server received/);
+});
+
+/* ===================== the read-through proxy ===================== */
+
+test('⚠️ THE PARENT MAY ASK AND CANNOT TELL — enforced by an allowlist on the CHILD', () => {
+  /*
+   * I2 was "there is no downward channel", enforced by the absence of a mechanism. The parent can
+   * now ASK, so what must stay true is that it cannot TELL — and "we only send reads" is a
+   * convention, which holds until somebody adds one convenient endpoint.
+   *
+   * A blocklist would have been the natural shape and is the wrong one: it fails open for every
+   * route added after it was written.
+   */
+  const proxy = fs.readFileSync(
+    path.join(__dirname, '..', 'lib', 'mesh', 'read-proxy.js'), 'utf8');
+  assert.match(proxy, /const READABLE = Object\.freeze\(\{/, 'an allowlist, not a blocklist');
+  assert.match(proxy, /!== 'GET'/, 'and the method is pinned');
+  for (const verb of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    assert.ok(!new RegExp(`'${verb}'\\s*:`).test(proxy), `${verb} must not be routable`);
+  }
+});
+
+test('every readable path names the grant it needs', () => {
+  // A proxy that ignored the grant would be the way around the client's own decision about what
+  // travels — two paths to the same data, one of them more generous than anybody intended.
+  const proxy = fs.readFileSync(
+    path.join(__dirname, '..', 'lib', 'mesh', 'read-proxy.js'), 'utf8');
+  const block = proxy.slice(proxy.indexOf('const READABLE'), proxy.indexOf('function isReadable'));
+  const paths = [...block.matchAll(/'(\/api\/[a-z-]+)':/g)].map((m) => m[1]);
+  assert.ok(paths.length >= 1, 'there must be readable paths');
+  for (const p of paths) {
+    assert.match(block, new RegExp(`'${p}':\\s*\\{[^}]*grant:`), `${p} must declare a grant`);
+  }
 });

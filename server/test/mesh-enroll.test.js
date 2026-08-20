@@ -34,7 +34,10 @@ function freshDb() {
       tls_verify INTEGER DEFAULT 1, peer_version TEXT, peer_min_version TEXT, token_hash TEXT,
       token_expires_at INTEGER, client_id TEXT, created_at INTEGER, last_sync_at INTEGER,
       revoked_at INTEGER, peer_url TEXT, up_token TEXT, peer_name TEXT,
-      UNIQUE (peer_node_id, direction));
+      shared_workspaces TEXT, UNIQUE (peer_node_id, direction));
+    CREATE TABLE workspaces (id TEXT PRIMARY KEY, organization_id TEXT, name TEXT);
+    CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT);
+    CREATE TABLE workspace_members (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, role TEXT);
     CREATE TABLE mesh_pairing_codes (id TEXT PRIMARY KEY, code TEXT NOT NULL,
       role_capabilities TEXT DEFAULT '[]', grant_categories TEXT DEFAULT '[]', client_id TEXT,
       retention_days INTEGER, created_by TEXT, created_at INTEGER NOT NULL,
@@ -195,12 +198,24 @@ test('a node below the version floor is refused, and a 2.0.0 prerelease is NOT',
   } finally { await close(); cleanup(db); }
 });
 
-test('only the instance owner may connect this server to another', async () => {
+test('⚠️ minting is instance-owner-only; enrolling follows what you administer', async () => {
+  /*
+   * Two different acts. ACCEPTING an observer exposes whatever the code grants and is therefore an
+   * instance-level decision. REPORTING UPWARD exposes only what the person doing it administers, so
+   * a workspace owner putting their own workspace under an MSP's hub should not need the instance
+   * owner to broker it — requiring that just means it gets done by sharing an admin login instead.
+   */
   const db = freshDb();
   const { base, close } = await serve(db, tech);
   try {
-    assert.equal((await post(base, '/api/mesh/pair/code', { grant: ['health'], capabilities: ['consumes-telemetry'] })).status, 403);
-    assert.equal((await post(base, '/api/mesh/uplink', { parentUrl: 'https://x', code: 'AAAAA-BBBBB' })).status, 403);
+    assert.equal((await post(base, '/api/mesh/pair/code',
+      { grant: ['health'], capabilities: ['consumes-telemetry'] })).status, 403,
+      'a technician cannot hand out a pairing code');
+
+    // …and with no workspaces of their own, there is nothing they could report upward either.
+    const r = await post(base, '/api/mesh/uplink', { parentUrl: 'https://x', code: 'AAAAA-BBBBB' });
+    assert.equal(r.status, 403);
+    assert.match((await r.json()).error, /do not administer any workspace/);
   } finally { await close(); cleanup(db); }
 });
 
@@ -254,5 +269,93 @@ test('a node cannot enroll with itself', async () => {
       { code: mint.code, nodeId: mint.nodeId, version: '2.0.0', ancestry: [] });
     assert.equal(r.status, 400);
     assert.match((await r.json()).error, /cannot enroll with itself/);
+  } finally { await close(); cleanup(db); }
+});
+
+/* ===================== which workspaces travel up ===================== */
+
+function seedWorkspaces(db) {
+  db.prepare("INSERT INTO organizations VALUES ('o1','Acme')").run();
+  for (const [id, name] of [['w1', 'Retail'], ['w2', 'Corporate'], ['w3', 'Someone Else']]) {
+    db.prepare('INSERT INTO workspaces VALUES (?,?,?)').run(id, 'o1', name);
+  }
+  // The technician administers two of the three.
+  db.prepare("INSERT INTO workspace_members VALUES ('m1','w1','u2','admin')").run();
+  db.prepare("INSERT INTO workspace_members VALUES ('m2','w2','u2','owner')").run();
+}
+
+test('⚠️ ONLY THE INSTANCE OWNER CAN SHARE EVERY WORKSPACE', () => {
+  /*
+   * "All" includes workspaces that do not exist yet, which is a standing grant over things nobody
+   * has decided about. A member choosing it would be handing away a colleague's future workspace.
+   */
+  const db = freshDb();
+  seedWorkspaces(db);
+  return serve(db, tech).then(async ({ base, close }) => {
+    try {
+      const r = await fetch(`${base}/api/mesh/shareable-workspaces`).then((x) => x.json());
+      assert.equal(r.canShareAll, false, 'a technician may not');
+      assert.deepEqual(r.workspaces.map((w) => w.id).sort(), ['w1', 'w2'],
+        'and sees only the workspaces they administer');
+    } finally { await close(); }
+  }).finally(() => cleanup(db));
+});
+
+test('the instance owner sees every workspace and may share all', () => {
+  const db = freshDb();
+  seedWorkspaces(db);
+  return serve(db, owner).then(async ({ base, close }) => {
+    try {
+      const r = await fetch(`${base}/api/mesh/shareable-workspaces`).then((x) => x.json());
+      assert.equal(r.canShareAll, true);
+      assert.deepEqual(r.workspaces.map((w) => w.id).sort(), ['w1', 'w2', 'w3']);
+    } finally { await close(); }
+  }).finally(() => cleanup(db));
+});
+
+test('⚠️ SHARING A WORKSPACE YOU DO NOT ADMINISTER IS REFUSED, not silently trimmed', async () => {
+  /*
+   * Trimming would leave the operator believing they shared something they did not, and they would
+   * find out when a report came back empty — long after the pairing conversation ended.
+   */
+  const db = freshDb();
+  seedWorkspaces(db);
+  const { base, close } = await serve(db, tech);
+  try {
+    const r = await post(base, '/api/mesh/uplink', {
+      parentUrl: 'https://hub.example', code: 'AAAAA-BBBBB',
+      workspaceIds: ['w1', 'w3'],
+    });
+    assert.equal(r.status, 403);
+    assert.match((await r.json()).error, /do not administer/);
+  } finally { await close(); cleanup(db); }
+});
+
+test('a technician asking to share ALL is refused', async () => {
+  const db = freshDb();
+  seedWorkspaces(db);
+  const { base, close } = await serve(db, tech);
+  try {
+    const r = await post(base, '/api/mesh/uplink',
+      { parentUrl: 'https://hub.example', code: 'AAAAA-BBBBB', shareAllWorkspaces: true });
+    assert.equal(r.status, 403);
+    assert.match((await r.json()).error, /instance owner/);
+  } finally { await close(); cleanup(db); }
+});
+
+test('sharing nothing at all is refused rather than treated as everything', async () => {
+  /*
+   * ⚠️ THE FAILURE THIS PREVENTS IS THE WORST ONE AVAILABLE. null means "all workspaces" in the
+   * column, so an empty selection quietly becoming null would turn "I picked none" into "I shared
+   * every one, forever, including future ones" — opposite outcomes, one keystroke apart.
+   */
+  const db = freshDb();
+  seedWorkspaces(db);
+  const { base, close } = await serve(db, tech);
+  try {
+    const r = await post(base, '/api/mesh/uplink',
+      { parentUrl: 'https://hub.example', code: 'AAAAA-BBBBB', workspaceIds: [] });
+    assert.equal(r.status, 400);
+    assert.match((await r.json()).error, /at least one workspace/);
   } finally { await close(); cleanup(db); }
 });
