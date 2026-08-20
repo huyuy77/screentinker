@@ -21,6 +21,13 @@ const DATA_DIR = path.join(os.tmpdir(), 'st-flood-' + crypto.randomBytes(4).toSt
 const LOG = path.join(os.tmpdir(), 'st-flood-' + crypto.randomBytes(4).toString('hex') + '.log');
 let proc;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+/*
+ * A whole server process is spawned for this file, and both helpers wait on a websocket
+ * round trip against it. 4s was enough on a developer machine and a coin flip on a shared
+ * CI runner — the failure was a timeout at 4006ms, not a rate-limiting bug. The boot probe
+ * above already allows 20s; these now sit in the same range rather than an order below it.
+ */
+const REGISTER_TIMEOUT_MS = 15_000;
 
 before(async () => {
     PORT = await freePort();
@@ -40,13 +47,20 @@ before(async () => {
 });
 after(() => { try { proc.kill('SIGKILL'); } catch { /* */ } });
 
+/*
+ * ⚠️ REJECTS ON TIMEOUT — it used to resolve null, and a caller that forgot to check got
+ * "Cannot read properties of null (reading 'id')" from inside a socket.io connect handler
+ * three frames deep in openRegistered(). That is what a slow CI runner actually looked like:
+ * an opaque TypeError naming neither this helper nor provisioning. openRegistered() below has
+ * always rejected; this now matches it, so a caller cannot proceed on a device that never came.
+ */
 function provision() {
   const code = String(crypto.randomInt(100000, 1000000));
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const sock = ioClient(`${BASE}/device`, { transports: ['websocket'], reconnection: false, forceNew: true });
     sock.on('connect', () => sock.emit('device:register', { pairing_code: code }));
     sock.on('device:registered', (d) => { try { sock.close(); } catch { /* */ } resolve({ id: d.device_id, token: d.device_token }); });
-    setTimeout(() => resolve(null), 4000);
+    setTimeout(() => reject(new Error('provision timeout')), REGISTER_TIMEOUT_MS);
   });
 }
 function openRegistered(dev) {
@@ -55,7 +69,7 @@ function openRegistered(dev) {
     sock.on('connect', () => sock.emit('device:register', { device_id: dev.id, device_token: dev.token, device_info: { app_version: 'test' } }));
     sock.on('device:registered', () => resolve(sock));
     sock.on('device:auth-error', () => reject(new Error('auth-error')));
-    setTimeout(() => reject(new Error('register timeout')), 4000);
+    setTimeout(() => reject(new Error('register timeout')), REGISTER_TIMEOUT_MS);
   });
 }
 const linesFor = (id, needle) => fs.readFileSync(LOG, 'utf8').split('\n').filter(l => l.includes(id) && l.includes(needle)).length;
