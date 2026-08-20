@@ -56,9 +56,8 @@ jobs:
   # down with 1676 tests green.
   #
   # Node 24 because node:sqlite is unflagged only from 23.4; on 22.x it needs --experimental-sqlite
-  # and on the 20.x the job above uses it does not exist at all. --omit=optional installs the tree
-  # the way the payload is built, so the fallback is reached the same way it is on a player rather
-  # than by an env var alone.
+  # and on the 20.x the job above uses it does not exist at all. The driver is then forced by env
+  # var rather than by omitting the native module — see the install step for why that reversed.
   unit-node-sqlite:
     name: Unit tests (node:sqlite fallback, Node 24)
     runs-on: ubuntu-latest
@@ -91,6 +90,42 @@ jobs:
                    if (d.driverName !== 'node:sqlite') { console.error('expected the fallback, got ' + d.driverName); process.exit(1); }"
         env:
           ST_SQLITE_DRIVER: node
+      # ⚠️ A PILE OF FAILED *FILES* WITH NO FAILED ASSERTION IS A CRASH, NOT A TEST FAILURE.
+      #
+      # This job — and only this job, because only this job runs Node 24 — intermittently reports
+      # unrelated test files as failed with nothing but 'test failed' and no assertion text. The
+      # test bodies all passed; the PROCESS died, and `node --test` has no better word for that.
+      #
+      #   node[2508]: void node::RemoveEnvironmentCleanupHook(v8::Isolate*, CleanupHook, void*)
+      #   Assertion failed: (env) != nullptr
+      #    3: Statement::~Statement()  [server/node_modules/better-sqlite3/build/Release/...]
+      #
+      # Upstream, open, no fix: WiseLibs/better-sqlite3#1515 "Intermittent ObjectWrap cleanup abort
+      # during Statement GC on Node 24". better-sqlite3's Statement extends node::ObjectWrap; V8's
+      # weak callback destroys it DURING GC at a moment when the isolate has no current Node
+      # Environment, so Node's own assertion aborts the process. Mid-run, not at exit — which is why
+      # it hits a different, arbitrary set of files each time.
+      #
+      # BEFORE BLAMING YOUR DIFF, count them:
+      #
+      #   gh run view <id> --log | grep -c "Assertion failed: (env) != nullptr"
+      #
+      # One abort per ✖ file means every "failure" is this and your diff is innocent. On 2026-08-20
+      # that read 12 aborts / 12 files. ⚠️ Scope it from the FULL log, not `--log-failed`, whose tail
+      # is truncated — it listed 6 of the 12 and sent me looking for a common cause among six files
+      # that did not have one.
+      #
+      # What it is NOT, so nobody re-derives it: not the diff (the victims are whichever of the 59
+      # test files that require('better-sqlite3') directly as a harness get caught by GC); not a
+      # missing db.close() (branding.test.js closes and aborts anyway); not a Node bump (green and
+      # red runs both resolved 24.19.0); and it does not reproduce locally — CI-identical, this suite
+      # runs 2111/2111 with zero aborts. It needs a 4-core runner's GC timing.
+      #
+      # Re-run the job. The real fix is better-sqlite3 13.x, which moved to the N-API and structurally
+      # deletes the ObjectWrap path that aborts — but the 12.9.0 pin is exact on purpose (see
+      # CHANGELOG) and it is the last native dep on every production server, so that is a deliberate
+      # upgrade with its own validation, not a drive-by. Production and every other job run Node 20,
+      # where this has never appeared.
       - run: npm test
         env:
           ST_SQLITE_DRIVER: node
