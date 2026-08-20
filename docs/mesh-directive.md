@@ -302,6 +302,14 @@ Store UTC, carry origin timezone on the row, and let the **view** choose the buc
 
 ## Phase 4 — Depth unlock
 
+> **Status: built, NOT unlocked.** Multi-hop relay, deep skew, subtree re-parenting and aggregate
+> fidelity (`lib/mesh/fidelity.js`) are implemented and tested at depth 4.
+>
+> ⚠️ **`MESH_MAX_DEPTH` still defaults to 2, deliberately.** The gate is this document's own: *raise
+> it only after two-tier has run against real hardware*. Nothing has been deployed, so an operator
+> raises it knowingly. A test asserts the default has not drifted — the easiest way to lose a gate
+> like this is for somebody to bump a constant while making a deep test pass.
+
 Raise `MESH_MAX_DEPTH` only after two-tier has run against real hardware. Multi-hop relay, deep skew,
 subtree re-parenting, aggregate fidelity.
 

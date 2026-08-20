@@ -65,6 +65,19 @@ no such handler exists in `server/lib/mesh/` proves there is nothing to fire. Sa
 address: the risk is not that today's code calls a vendor host, it is that a future "sensible default"
 gets added during an outage. A source assertion is what catches that in review.
 
+### The depth gate
+
+`MESH_MAX_DEPTH` defaults to **2** and must not be raised in code. The machinery for deeper trees
+exists and is tested — multi-hop relay, deep clock skew, subtree re-parenting, per-hop downsampling —
+but two tiers have not yet run against real hardware, which is the condition the directive sets.
+Guarded by `THE DEPTH CAP IS STILL 2` in `server/test/mesh-depth.test.js`.
+
+**Aggregate fidelity, specified rather than emergent:** alerts and current state are full fidelity at
+any depth; historical telemetry thins per hop with the resolution carried alongside the data;
+proof-of-play is never thinned, and is on a refuse-list rather than relying on a grant property
+somebody has to remember to set — averaged evidence is not evidence, and the failure is silent until
+an invoice is disputed.
+
 ### Explicitly not in 2.0
 
 Downward commands, content push, cross-node writes of any kind, automatic topology discovery,
