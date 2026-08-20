@@ -1,7 +1,17 @@
 #!/bin/bash
-# Build brightsign/autorun-server.zip — the ScreenTinker SERVER, packaged to run ON a player.
+# Build the ScreenTinker SERVER, packaged to run ON a player.
 #
-#   scripts/build-server-zip.sh [-o path/to/autorun-server.zip]
+#   scripts/build-server-zip.sh            -> brightsign/server-all-in-one.zip
+#   scripts/build-server-zip.sh --payload  -> brightsign/server-payload.zip   (the one that ships)
+#
+# ⚠️ THE DEFAULT BUILD DOES NOT BOOT, and no longer carries a name that implies it does. At ~73MB
+# across 9,600 entries BrightSignOS's boot-time zip reader cannot open it — "ZipArchive error at
+# line 91", then "Forcing recovery" — while provisioning unpacks the identical archive happily. It
+# was called autorun-server.zip, which is the name an operator reaches for first, on the artifact
+# guaranteed to fail. That name now belongs to build-server-boot-zip.sh.
+#
+# Kept because it is still the whole server in one file for manual install over SFTP, and because
+# it is the control in the size experiment the two-stage design rests on.
 #
 # Drop it on the storage root of a BrightSign running OS 10 (Node 24) and power-cycle. autozip.brs
 # unpacks it in place and autorun.brs launches the server with roNodeJs, painting a diagnostic
@@ -31,7 +41,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$OUT" ] || { [ "$PAYLOAD_ONLY" = 1 ] && OUT="brightsign/server-payload.zip" || OUT="brightsign/autorun-server.zip"; }
+[ -n "$OUT" ] || { [ "$PAYLOAD_ONLY" = 1 ] && OUT="brightsign/server-payload.zip" || OUT="brightsign/server-all-in-one.zip"; }
 
 command -v zip >/dev/null || { echo "ERROR: 'zip' is not installed." >&2; exit 1; }
 

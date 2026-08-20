@@ -1,7 +1,13 @@
 #!/bin/bash
-# Build brightsign/autorun-boot.zip — ONLY the four files needed to start, no server payload.
+# Build brightsign/autorun-server.zip — what you drop on a player to make it a SERVER.
 #
 #   scripts/build-server-boot-zip.sh [-o path]
+#
+# ⚠️ THIS IS THE ONE TO SHIP. It carries only the four files needed to start; the ~71MB of server
+# and node_modules arrives separately as server-payload.zip and is unpacked by Node. It was called
+# autorun-boot.zip, which described how it is BUILT rather than what it is FOR — and the name
+# autorun-server.zip sat on the all-in-one build, which is the package that cannot boot at all. The
+# good name was on the artifact that does not work.
 #
 # WHY THIS EXISTS. The full server package is ~73MB across 9,356 entries, and BrightSignOS cannot
 # open it: the boot-time autorun scan reports
@@ -24,7 +30,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT="brightsign/autorun-boot.zip"
+OUT="brightsign/autorun-server.zip"
 while [ $# -gt 0 ]; do
   case "$1" in
     -o|--out) OUT="${2:-}"; shift 2 ;;
