@@ -97,8 +97,21 @@ test('⚠️ THE WORKER AND THE FALLBACK RETURN THE SAME ANSWER', async () => {
        * dropped by JSON identically. So the property worth guarding is that what the PARENT receives
        * is the same, not that two in-memory representations share a prototype.
        */
-      assert.equal(JSON.stringify(a), JSON.stringify(b),
-        `${p} must be identical on both paths, as delivered`);
+      /*
+       * ⚠️ EXCEPT `asOf`, WHICH IS ALLOWED TO DIFFER — and comparing it exactly is a test bug I
+       * shipped. Each path stamps its own generation time, which is correct: they are two separate
+       * computations. An exact comparison therefore fails whenever the two straddle a second
+       * boundary — locally almost never, in CI often enough to block a release.
+       *
+       * The property is that the same QUESTION yields the same DATA, so the timestamps are checked
+       * for being close rather than equal. "Re-run it" would have been the wrong response to this.
+       */
+      const strip = (r) => JSON.stringify({ ...r, asOf: undefined });
+      assert.equal(strip(a), strip(b), `${p} must be identical on both paths, as delivered`);
+      if (a.asOf !== undefined) {
+        assert.ok(Math.abs(a.asOf - b.asOf) <= 2,
+          `${p}: the two paths stamped times ${Math.abs(a.asOf - b.asOf)}s apart`);
+      }
       assert.equal(a.ok, true, `${p} should have answered`);
     }
   } finally { withWorker.stop(); withoutWorker.stop(); cleanup(db); }
