@@ -433,3 +433,22 @@ test('topology reports per-edge health and the depth cap', async () => {
     } finally { await close(); }
   } finally { cleanup(db); }
 });
+
+test('⚠️ the screenshot proxy accepts a QUERY token, because an <img> cannot send a header', async () => {
+  /*
+   * The proxy worked and the page still showed a broken image: requireAuth reads the Authorization
+   * header, and a browser loading an image cannot send one — so the route answered 401 to the only
+   * client that will ever call it. Every test passed because every test used a header.
+   *
+   * The local screenshot route solved this the same way with the same resolver; matching it keeps
+   * ONE definition of "this token is a usable session" rather than a second, subtly different one.
+   */
+  const fs = require('node:fs');
+  const src = fs.readFileSync(require.resolve('../routes/mesh.js'), 'utf8');
+  const route = src.slice(src.indexOf("router.get('/screenshot/"));
+  const body = route.slice(0, 1400);
+  assert.match(body, /req\.headers\.authorization/, 'a header still works');
+  assert.match(body, /req\.query\.token/, 'and a query token, for the <img> case');
+  assert.match(body, /resolveSessionUser/, 'resolved by the shared resolver, not a local copy');
+  assert.doesNotMatch(body, /jwt\.verify/, 'never a second, hand-rolled verification');
+});
