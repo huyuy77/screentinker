@@ -273,9 +273,61 @@ jobs:
           test "$REPORT" = "400"
           echo "OK: collector mounted and answering"
 
+      # "Off by default" is the central safety claim of the 2.0.0 mesh: an install that never sets
+      # the flags should be indistinguishable from 1.9.x, with no routes rather than routes that
+      # answer emptily. Nothing enforced it, so a refactor that mounted /api/mesh unconditionally
+      # would have kept every test green while quietly giving every install a new API surface.
+      #
+      # 404 vs 401 is the discriminator, and it needs no credentials: unmounted answers
+      # {"error":"Not found"}, mounted answers {"error":"Authentication required"}.
+      - name: Assert the mesh is ABSENT when the flags are unset
+        run: |
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/api/mesh/nodes)"
+          echo "/api/mesh/nodes with no MESH_* set -> HTTP $CODE (want 404)"
+          test "$CODE" = "404"
+          echo "OK: no mesh surface on a default install"
+
       - name: Stop server
         if: always()
         run: kill "$(cat "$RUNNER_TEMP/server.pid")" 2>/dev/null || true
+
+      # ⚠️ AND NOW BOOT IT WITH THE FLAGS ON.
+      #
+      # Same reasoning as TELEMETRY_COLLECTOR above, and the mesh is now the bigger instance of it:
+      # ~19k lines that only a deployment which opts in ever loads. The collector taught this the
+      # expensive way — a load-time crash inside a config-gated block took production down with
+      # every check green. The boot above deliberately runs the prod configuration (flags unset),
+      # which means it can never execute any of this. So boot it a second time.
+      - name: Boot server with the mesh ON
+        working-directory: server
+        env:
+          SELF_HOSTED: 'true'
+          MESH_ACCEPT_ENROLLMENT: '1'
+          MESH_ALLOW_UPLINK: '1'
+        run: |
+          node server.js > "$RUNNER_TEMP/server-mesh.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/server-mesh.pid"
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3001/api/status >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server did not come up with the mesh on:"; cat "$RUNNER_TEMP/server-mesh.log"; exit 1
+
+      # Booting is not enough on its own — the routes could be mounted and broken, which is exactly
+      # what the collector step below the first boot exists to catch. 401 proves the router is
+      # really mounted and reached; 404 would mean the flag did not take.
+      - name: Assert the mesh surface answers when enabled
+        run: |
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/api/mesh/nodes)"
+          echo "/api/mesh/nodes with MESH_ACCEPT_ENROLLMENT=1 -> HTTP $CODE (want 401, i.e. mounted)"
+          test "$CODE" = "401"
+          grep -q "\[mesh\] hub API mounted" "$RUNNER_TEMP/server-mesh.log" \
+            || { echo "server never logged the hub API mount:"; cat "$RUNNER_TEMP/server-mesh.log"; exit 1; }
+          echo "OK: mesh mounted and answering"
+
+      - name: Stop the mesh server
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/server-mesh.pid")" 2>/dev/null || true
 
   # TODO (deferred - needs a tag earlier than HEAD, so meaningful from v1.8.0 on):
   # upgrade-path job. Restore a db created by the previous tagged release, boot
