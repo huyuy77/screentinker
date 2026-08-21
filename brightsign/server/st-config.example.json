@@ -6,5 +6,8 @@
   "payloadUrl": "https://alpha.screentinker.com/scripts/server-payload.zip",
 
   "_autoUpdate": "true (default) checks that manifest on every boot and installs a different version. Set false to pin this box to whatever it already has. A failed check or a failed update NEVER stops the installed server from starting.",
-  "autoUpdate": true
+  "autoUpdate": true,
+
+  "_updateCheckHours": "How often a RUNNING box asks whether a newer payload has been published. 24 by default; 0 checks only at boot. The check downloads the small manifest, not the package. When something new is published the box REBOOTS so the boot path installs it - the server runs inside the launcher process, so it cannot be replaced underneath itself. Each published payload is worth exactly one reboot: if the install does not take, the box stays where it is and says so in .payload-install.log rather than rebooting every day. autoUpdate:false disables this regardless of the value here.",
+  "updateCheckHours": 24
 }

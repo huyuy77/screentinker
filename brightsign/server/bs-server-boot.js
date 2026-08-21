@@ -463,6 +463,13 @@ function startServer() {
   try {
     stageMediaTools();
     require('./server/server.js');
+    /*
+     * ⚠️ ONLY ONCE THE SERVER IS ACTUALLY UP. A box whose server failed to start must not go on
+     * rebooting itself on a timer: the reboot cannot fix a broken payload, and a box in a reboot
+     * cycle is a box nobody can log into to find out why. Broken and reachable beats broken and
+     * spinning.
+     */
+    scheduleUpdateChecks();
   } catch (e) {
     remember('error', ['server failed to start', e && e.stack ? e.stack : String(e)]);
     fatalMessage = String(e && e.message ? e.message : e);
@@ -494,6 +501,26 @@ const PAYLOAD_URL = process.env.ST_PAYLOAD_URL || ST_CFG.payloadUrl
 const MANIFEST_URL = String(PAYLOAD_URL).replace(/\.zip$/, '.json');
 // Set "autoUpdate": false to pin a box to what it has. Absent means updates are on.
 const AUTO_UPDATE = ST_CFG.autoUpdate !== false && ST_CFG.autoUpdate !== 0;
+
+/*
+ * How often a running box asks whether a newer payload has been published. 0 disables it, and
+ * `autoUpdate: false` disables it regardless — a box pinned to what it has must not reboot itself
+ * looking for something it would refuse to install.
+ *
+ * ⚠️ Until this existed the check ran ONCE, at boot, so a player that stayed up for a month never
+ * saw a single release. Updating meant someone power-cycling it, which is exactly the manual step
+ * the whole update path exists to remove.
+ */
+const UPDATE_CHECK_HOURS = ST_CFG.updateCheckHours != null ? Number(ST_CFG.updateCheckHours) : 24;
+/*
+ * ⚠️ ONE REBOOT PER PUBLISHED PAYLOAD, EVER. This is the circuit breaker, and it is not optional.
+ *
+ * The check reboots to let the boot path install (see scheduleUpdateChecks). If that install then
+ * fails to take — a bad archive, a full disk, a digest that cannot be recorded — the next check sees
+ * the same difference and reboots again. Without a breaker that is a box rebooting every day forever
+ * and re-downloading 80MB each time, which is #144's OTA loop wearing a different hat.
+ */
+const MAX_REBOOTS_PER_PAYLOAD = 1;
 
 function installedVersion() {
   try { return fs.readFileSync(path.join(__dirname, 'VERSION'), 'utf8').trim(); }
@@ -626,6 +653,91 @@ function runInstall(manifest) {
     remember('error', [fatalMessage]);
     post({ type: 'st-server-fatal', message: fatalMessage });
   });
+}
+
+/*
+ * Ask, on a schedule, whether a newer payload has been published.
+ *
+ * ⚠️ IT REBOOTS RATHER THAN INSTALLING, and that is the whole design decision.
+ *
+ * startServer() does `require('./server/server.js')` — the server runs IN THIS PROCESS, not as a
+ * child. So there is no restarting it, and installing over the tree while it runs would swap files
+ * underneath a process that has already required half of them: everything loaded keeps the old code,
+ * everything required later gets the new, and the two halves disagree in ways that surface hours
+ * later as nonsense. A reboot hands the job to the boot path above, which is the same install that
+ * is already exercised on every cold start rather than a second, rarer copy of it.
+ *
+ * ⚠️ AND IT ASKS FOR THE MANIFEST ONLY. ~150 bytes to answer "is there anything new", against 80MB
+ * to find out by downloading. A check has to be cheaper than the thing it avoids or nobody can
+ * afford to run it often.
+ */
+const ATTEMPT_FILE = path.join(__dirname, '.update-attempt');
+
+function readAttempt() {
+  try { return JSON.parse(fs.readFileSync(ATTEMPT_FILE, 'utf8')) || {}; }
+  catch (e) { return {}; }
+}
+
+/** The identity of a published payload: its digest when there is one, its version otherwise. */
+function payloadKey(m) {
+  return (m && (m.sha256 || m.version)) || null;
+}
+
+function noteAttempt(key) {
+  const prev = readAttempt();
+  const next = prev.key === key
+    ? { key, count: (prev.count || 0) + 1, at: Date.now() }
+    : { key, count: 1, at: Date.now() };
+  try { fs.writeFileSync(ATTEMPT_FILE, JSON.stringify(next)); }
+  catch (e) { /* a breaker that cannot be written must not stop the boot */ }
+  return next;
+}
+
+function checkForUpdate() {
+  fetchManifest((m) => {
+    // Same reasoning as the boot path: "nothing new" and "could not ask" take the same branch,
+    // because the only safe reading of an unanswerable question is to change nothing.
+    if (!m || !differs(m, installedVersion(), installedSha())) return;
+
+    const key = payloadKey(m);
+    const prev = readAttempt();
+    if (key && prev.key === key && (prev.count || 0) >= MAX_REBOOTS_PER_PAYLOAD) {
+      /*
+       * We already rebooted for exactly this payload and it is still not installed. Rebooting again
+       * would not produce a different result, and doing it daily forever is worse than staying put:
+       * a box that is out of date but up can be reached, looked at, and fixed.
+       */
+      console.error('[update] payload ' + m.version + ' still not installed after ' + prev.count +
+                    ' reboot(s) — not trying again. Check .payload-install.log on this device.');
+      return;
+    }
+
+    const attempt = noteAttempt(key);
+    console.log('[update] payload ' + m.version + ' published, have ' + (installedVersion() || 'none') +
+                ' — rebooting to install (attempt ' + attempt.count + ')');
+    post({ type: 'st-server-updating', version: m.version });
+    post({ type: 'reboot' });
+  });
+}
+
+function scheduleUpdateChecks() {
+  if (!AUTO_UPDATE || !(UPDATE_CHECK_HOURS > 0)) return;
+  const everyMs = UPDATE_CHECK_HOURS * 3600 * 1000;
+  /*
+   * ⚠️ JITTERED. Boxes in a fleet are provisioned together and therefore boot together, so a fixed
+   * interval has all of them asking the same server in the same second, forever, every day. The
+   * spread is a fraction of the interval and costs nothing.
+   */
+  const jitter = Math.floor(Math.random() * Math.min(everyMs * 0.1, 30 * 60 * 1000));
+  const t = setInterval(checkForUpdate, everyMs + jitter);
+  // ⚠️ Never hold the process open for a timer. This one exists to serve a running server, not to
+  // keep a dead one alive.
+  if (t && typeof t.unref === 'function') t.unref();
+  // console.log, not remember(): the wrapper above feeds console into the ring buffer anyway, so
+  // this lands in BOTH the on-device debug log and the boot output an operator actually reads.
+  // (autorun.brs parses stdout for JSON and ignores anything that is not, so plain lines are safe.)
+  console.log('[update] update checks every ' + UPDATE_CHECK_HOURS + 'h (+' +
+              Math.round(jitter / 60000) + 'm jitter)');
 }
 
 if (fs.existsSync(SERVER_ENTRY) && !AUTO_UPDATE) {
