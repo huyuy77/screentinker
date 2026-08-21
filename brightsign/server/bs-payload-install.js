@@ -334,6 +334,40 @@ async function install(opts) {
   try { fs.unlinkSync(zipPath); } catch (e) { /* not worth failing over */ }
 
   if (!fs.existsSync(entry)) throw new Error('install finished but ' + entry + ' is missing');
+  note('tree replaced, ' + result.files + ' files, server/server.js present');
+
+  /*
+   * ⚠️ RECORD THE DIGEST HERE — BEFORE the launcher self-refresh below, not after it.
+   *
+   * The tree is now complete and verified, which is the moment "this box is running these bytes"
+   * becomes true. Everything after this point is optional extra credit that can fail without making
+   * that statement false, and the launcher refresh explicitly calls itself the riskiest copy in the
+   * project. Recording afterwards made the durable fact depend on the fragile step.
+   *
+   * That is not hypothetical. A real XT245 took 2.0.0-alpha1, ran it, reported it up the mesh — and
+   * came back with no .payload-sha256 at all and a log that stopped before this line. Because the
+   * digest is what detects a REBUILD of an unchanged version string, and every alpha build is
+   * "2.0.0-alpha1", that box had quietly lost the ability to see the next payload. It still boots,
+   * because differs() falls back to comparing versions, which is why nothing looked wrong.
+   *
+   * ⚠️ READ IT BACK. This file is the entire basis of the next update decision, and a truncated or
+   * empty write reads as "no digest" — which silently degrades to version-only comparison rather
+   * than failing. Verifying costs one read of 64 bytes.
+   */
+  if (installedDigest) {
+    try {
+      fs.writeFileSync(path.join(installDir, '.payload-sha256'), installedDigest);
+      const back = fs.readFileSync(path.join(installDir, '.payload-sha256'), 'utf8').trim();
+      if (back !== installedDigest) throw new Error('wrote ' + installedDigest.slice(0, 12) +
+                                                    '… but read back ' + (back.slice(0, 12) || '(empty)') + '…');
+      note('recorded .payload-sha256=' + installedDigest);
+    } catch (e) {
+      note('could NOT record .payload-sha256: ' + (e && e.message) +
+           ' — this box will not detect a rebuild of the version it just installed');
+    }
+  } else {
+    note('no digest computed — nothing recorded, so the next boot cannot detect a rebuild');
+  }
 
   /*
    * ⚠️ REFRESH THE LAUNCHER TOO, or the update path can never update itself.
@@ -358,28 +392,16 @@ async function install(opts) {
       if (fs.existsSync(to) && fs.readFileSync(from, 'utf8') === fs.readFileSync(to, 'utf8')) continue;
       if (fs.existsSync(to)) fs.copyFileSync(to, to + '.prev');
       fs.copyFileSync(from, to);
-      say('installing', 'refreshed ' + name, null);
+      // ⚠️ note(), not say(). say() goes to a status listener bound to localhost, which is exactly
+      // the thing nobody can query on a real player — so the account of the riskiest copy in the
+      // project existed only in a process no one could reach. This whole stretch used to write
+      // NOTHING to disk between "checksum verified" and the end, which is why a real failure here
+      // left a log that simply stopped and gave no way to tell how far it had got.
+      note('refreshed ' + name);
     } catch (e) {
       // A launcher that could not be refreshed is the one we already have, which works.
-      say('installing', 'kept existing ' + name, null);
+      note('kept existing ' + name + ' (' + ((e && e.message) || 'copy failed') + ')');
     }
-  }
-
-  /*
-   * ⚠️ RECORD WHAT WAS INSTALLED, BY CHECKSUM. Comparing version strings alone cannot see a rebuild:
-   * every alpha build is "2.0.0-alpha0", so a box would decide it was current and never take a fix.
-   * The manifest already carries a sha256 of the exact bytes, so storing it makes "is this the
-   * payload I am running?" answerable rather than inferred from a label that does not change.
-   */
-  if (installedDigest) {
-    try {
-      fs.writeFileSync(path.join(installDir, '.payload-sha256'), installedDigest);
-      note('recorded .payload-sha256=' + installedDigest);
-    } catch (e) {
-      note('could NOT record .payload-sha256: ' + (e && e.message));
-    }
-  } else {
-    note('no digest computed — nothing recorded, so the next boot cannot detect a rebuild');
   }
 
   note('installed ' + result.files + ' files');

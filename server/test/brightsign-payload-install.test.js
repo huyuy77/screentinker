@@ -236,3 +236,83 @@ test('a corrupted file is caught by its checksum instead of landing on disk', as
     assert.strictEqual(fs.existsSync(path.join(dir, 'server', 'server.js')), false);
   } finally { await s.close(); cleanup(); delete process.env.DATA_DIR; }
 });
+
+/*
+ * ⚠️ THE DIGEST MUST OUTLIVE EVERYTHING OPTIONAL THAT FOLLOWS IT.
+ *
+ * A real XT245 took 2.0.0-alpha1, ran it, and reported it up the mesh — then came back with no
+ * .payload-sha256 at all and an install log that simply stopped after "checksum verified". The
+ * digest was written AFTER the launcher self-refresh, a step whose own comment calls it the riskiest
+ * copy in the project, so the durable fact depended on the fragile step.
+ *
+ * The cost is invisible and permanent: the digest is what detects a REBUILD of an unchanged version
+ * string, and on an alpha line every build is "2.0.0-alpha1". differs() falls back to comparing
+ * versions, so the box keeps booting happily and simply never sees another payload.
+ */
+test('the digest is recorded even when the launcher self-refresh fails', async () => {
+  const { dir, cleanup } = scratch();
+  // A payload that carries a launcher, and a destination that cannot be written: the copy throws.
+  const withLauncher = PAYLOAD.concat([
+    ['brightsign/', ''], ['brightsign/server/', ''],
+    ['brightsign/server/bs-server-boot.js', 'module.exports = "new launcher";\n'],
+  ]);
+  const s = await serve(makeZip(withLauncher));
+  try {
+    process.env.DATA_DIR = path.join(dir, 'data');
+    // Make the launcher destination a DIRECTORY, so copyFileSync onto it fails.
+    fs.mkdirSync(path.join(dir, 'bs-server-boot.js'), { recursive: true });
+
+    const r = await installer.install({ url: s.url, installDir: dir });
+
+    const sha = path.join(dir, '.payload-sha256');
+    assert.strictEqual(fs.existsSync(sha), true,
+      'the digest must be on disk even though the launcher refresh failed');
+    assert.match(fs.readFileSync(sha, 'utf8').trim(), /^[0-9a-f]{64}$/);
+    assert.ok(r.files >= 3);
+
+    // And the failure is on disk, not only in a status listener bound to localhost.
+    const log = fs.readFileSync(path.join(dir, '.payload-install.log'), 'utf8');
+    assert.match(log, /kept existing bs-server-boot\.js/, 'the failed refresh is logged');
+    assert.match(log, /recorded \.payload-sha256=/, 'the digest record is logged');
+  } finally { await s.close(); cleanup(); delete process.env.DATA_DIR; }
+});
+
+test('the install log narrates the risky middle, not just its ends', async () => {
+  // Between "checksum verified" and the end, the installer extracts, replaces the entire tree and
+  // rewrites its own launcher — ~90 lines that used to write nothing to disk. That is why a real
+  // failure left a log that stopped dead and gave no way to tell how far it had got.
+  const { dir, cleanup } = scratch();
+  const s = await serve(makeZip(PAYLOAD));
+  try {
+    process.env.DATA_DIR = path.join(dir, 'data');
+    await installer.install({ url: s.url, installDir: dir });
+    const log = fs.readFileSync(path.join(dir, '.payload-install.log'), 'utf8');
+    for (const stage of [/install starting/, /downloaded \d+ bytes/, /tree replaced, \d+ files/,
+                         /recorded \.payload-sha256=/, /installed \d+ files/]) {
+      assert.match(log, stage, `the log is missing a stage: ${stage}`);
+    }
+    // Ordering matters: the digest must be durable before the launcher stage is attempted.
+    assert.ok(log.indexOf('recorded .payload-sha256') < log.indexOf('installed '),
+      'the digest is recorded before the install is declared finished');
+  } finally { await s.close(); cleanup(); delete process.env.DATA_DIR; }
+});
+
+test('a digest that does not read back is reported, not silently degraded to version-only', async () => {
+  const { dir, cleanup } = scratch();
+  const s = await serve(makeZip(PAYLOAD));
+  const realWrite = fs.writeFileSync;
+  try {
+    process.env.DATA_DIR = path.join(dir, 'data');
+    // Simulate the write that appears to succeed and leaves nothing behind — the state the XT245
+    // was actually found in. Without the read-back this is indistinguishable from success.
+    fs.writeFileSync = function (p, data, ...rest) {
+      if (String(p).endsWith('.payload-sha256')) return realWrite.call(fs, p, '', ...rest);
+      return realWrite.call(fs, p, data, ...rest);
+    };
+    await installer.install({ url: s.url, installDir: dir });
+    fs.writeFileSync = realWrite;
+    const log = fs.readFileSync(path.join(dir, '.payload-install.log'), 'utf8');
+    assert.match(log, /could NOT record \.payload-sha256/, 'an empty digest must be reported');
+    assert.match(log, /will not detect a rebuild/, 'and it must say what that costs');
+  } finally { fs.writeFileSync = realWrite; await s.close(); cleanup(); delete process.env.DATA_DIR; }
+});

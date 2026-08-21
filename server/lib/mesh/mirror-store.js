@@ -34,6 +34,26 @@ function upsertNodeHealth(db, { edgeId, originNodeId, body, originTs, receivedAt
       stale_since    = NULL
   `).run(originNodeId, edgeId, body.version || null, body.device_count ?? null,
          body.devices_online ?? null, originTs ?? null, receivedAt);
+
+  /*
+   * ⚠️ AND REFRESH THE EDGE'S OWN IDEA OF WHAT THE PEER RUNS.
+   *
+   * `mesh_edges.peer_version` was written once, at enrollment, and never again — so it reported
+   * whatever the peer happened to be running on pairing day, forever. A BrightSign that took
+   * 2.0.0-alpha1 and was demonstrably serving it still showed as alpha0 on the parent, because the
+   * only thing that had changed was the truth. The Servers view calls that column "version skew",
+   * which makes a frozen value worse than an absent one: it is the field an operator checks to
+   * confirm a fleet took an update, and it answers with the past.
+   *
+   * ⚠️ ONLY FOR THE EDGE'S DIRECT PEER. A node-health report legitimately RELAYS from deeper in the
+   * subtree, and a grandchild's version must not be written onto the child's edge. The guard is the
+   * `peer_node_id = ?` in the WHERE: for a relayed origin it matches nothing and the update is a
+   * no-op, which is the correct answer rather than a special case to remember.
+   */
+  if (body.version) {
+    db.prepare('UPDATE mesh_edges SET peer_version = ? WHERE id = ? AND peer_node_id = ?')
+      .run(body.version, edgeId, originNodeId);
+  }
 }
 
 /**

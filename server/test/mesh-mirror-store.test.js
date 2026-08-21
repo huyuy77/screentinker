@@ -28,6 +28,16 @@ function freshDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-'));
   const db = new Database(path.join(dir, 'm.db'));
   db.exec(`
+    -- ⚠️ REAL COLUMNS, because upsertNodeHealth now writes peer_version back onto the edge.
+    -- The guard test below includes this table for the same reason it includes the others.
+    CREATE TABLE mesh_edges (
+      id TEXT PRIMARY KEY, peer_node_id TEXT NOT NULL, direction TEXT NOT NULL,
+      role_capabilities TEXT NOT NULL DEFAULT '[]', grant_categories TEXT NOT NULL DEFAULT '[]',
+      transport_direction TEXT NOT NULL, retention_days INTEGER, tombstone_purge_days INTEGER,
+      tls_verify INTEGER NOT NULL DEFAULT 1, peer_version TEXT, peer_min_version TEXT,
+      token_hash TEXT, token_expires_at INTEGER, client_id TEXT, created_at INTEGER,
+      last_sync_at INTEGER, revoked_at INTEGER, peer_url TEXT, up_token TEXT, peer_name TEXT,
+      shared_workspaces TEXT);
     CREATE TABLE mesh_mirror_nodes (
       origin_node_id TEXT PRIMARY KEY, via_edge_id TEXT NOT NULL, node_version TEXT,
       device_count INTEGER, devices_online INTEGER, origin_ts INTEGER,
@@ -278,7 +288,7 @@ test('⚠️ the fixture schema matches the REAL one', () => {
       const { Database } = require('./db/sqlite-driver');
       const db = new Database(require('path').join(process.env.DATA_DIR, 'db', 'remote_display.db'));
       const out = {};
-      for (const t of ['mesh_mirror_nodes','mesh_mirror_devices','mesh_mirror_alerts','mesh_mirror_play_logs']) {
+      for (const t of ['mesh_mirror_nodes','mesh_mirror_devices','mesh_mirror_alerts','mesh_mirror_play_logs','mesh_edges']) {
         out[t] = db.prepare("select name from pragma_table_info('" + t + "')").all().map(r => r.name).sort();
       }
       db.close();
@@ -336,4 +346,63 @@ test('⚠️ first_seen_at is set ONCE and never re-stamped', () => {
     assert.equal(row.deleted_at, null, 'while the tombstone still clears');
     assert.equal(row.received_at, NOW + 7000, 'and received_at still tracks the latest');
   } finally { cleanup(db); }
+});
+
+/*
+ * ⚠️ peer_version WAS WRITTEN ONCE, AT ENROLLMENT, AND NEVER AGAIN.
+ *
+ * mesh-enroll.js sets it on INSERT; meshSocket.js never touched it. So the column reported whatever
+ * the peer happened to be running on pairing day, permanently. Found on real hardware: a BrightSign
+ * took 2.0.0-alpha1, ran it, and reported it up the link — while the parent still showed alpha0.
+ *
+ * That is worse than an absent value, because the Servers view labels this column "version skew".
+ * It is the field an operator reads to confirm a fleet took an update, and it answered with the past.
+ */
+test('a health report from the edge\'s own peer refreshes peer_version', () => {
+  const db = freshDb();
+  {
+    db.prepare(`INSERT INTO mesh_edges (id, peer_node_id, direction, transport_direction, peer_version)
+                VALUES ('e1','child-1','down','they-dial','2.0.0-alpha0')`).run();
+    ms.upsertNodeHealth(db, {
+      edgeId: 'e1', originNodeId: 'child-1',
+      body: { version: '2.0.0-alpha1', device_count: 1, devices_online: 1 },
+      originTs: NOW, receivedAt: NOW,
+    });
+    assert.equal(db.prepare("SELECT peer_version v FROM mesh_edges WHERE id='e1'").get().v, '2.0.0-alpha1');
+  }
+});
+
+test('⚠️ a RELAYED report from deeper in the subtree does NOT overwrite the edge', () => {
+  // A node-health payload legitimately arrives via a child on behalf of a GRANDCHILD. Writing that
+  // onto the edge would report the grandchild's version as the child's — the parent would then show
+  // a version nobody on that link is running, and the deeper the tree the more wrong it gets.
+  const db = freshDb();
+  {
+    db.prepare(`INSERT INTO mesh_edges (id, peer_node_id, direction, transport_direction, peer_version)
+                VALUES ('e1','child-1','down','they-dial','2.0.0-alpha1')`).run();
+    ms.upsertNodeHealth(db, {
+      edgeId: 'e1', originNodeId: 'grandchild-9',      // relayed THROUGH child-1, not FROM it
+      body: { version: '1.9.39', device_count: 4, devices_online: 2 },
+      originTs: NOW, receivedAt: NOW,
+    });
+    assert.equal(db.prepare("SELECT peer_version v FROM mesh_edges WHERE id='e1'").get().v, '2.0.0-alpha1',
+      'the grandchild version leaked onto the child edge');
+    // ...while the grandchild's own mirrored row is still recorded, which is the point of relaying.
+    assert.equal(db.prepare("SELECT node_version v FROM mesh_mirror_nodes WHERE origin_node_id='grandchild-9'").get().v,
+      '1.9.39');
+  }
+});
+
+test('a report carrying no version leaves the last known one alone', () => {
+  // A health-only grant may omit it. "I did not say" must not read as "I am unknown", or the
+  // Servers view would flap to blank every time a narrow-grant peer reported.
+  const db = freshDb();
+  {
+    db.prepare(`INSERT INTO mesh_edges (id, peer_node_id, direction, transport_direction, peer_version)
+                VALUES ('e1','child-1','down','they-dial','2.0.0-alpha1')`).run();
+    ms.upsertNodeHealth(db, {
+      edgeId: 'e1', originNodeId: 'child-1', body: { device_count: 1 }, originTs: NOW, receivedAt: NOW,
+    });
+    assert.equal(db.prepare("SELECT peer_version v FROM mesh_edges WHERE id='e1'").get().v, '2.0.0-alpha1');
+  }
 });
