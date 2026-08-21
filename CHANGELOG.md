@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.0.0-alpha2
+
+Everything here came out of watching a real BrightSign take the previous release, rather than from
+reading code. The mesh is still **off by default** and still read-only; the limits under
+2.0.0-alpha0 all still apply.
+
+### Added — a running player checks for a new server payload every 24 hours
+
+The check ran once, at boot. A player that stayed up for a month never saw a single release, so
+updating it meant someone power-cycling it — the manual step the update path exists to remove.
+
+It asks for the small manifest, not the 80MB package. When something new is published the player
+**reboots** so the boot path installs it: the server runs inside the launcher process, so it cannot
+be replaced underneath itself, and rebooting reuses the install that runs on every cold start rather
+than a second, rarer copy of it.
+
+⚠️ **Each published payload is worth exactly one reboot.** If an install does not take, the player
+stays where it is and says why in `.payload-install.log` rather than rebooting every day and
+re-downloading the package each time. Checks are jittered, because a fleet provisioned together
+boots together and would otherwise all ask in the same second forever.
+
+Configure with `updateCheckHours` in `st-config.json` (24 by default, `0` checks only at boot).
+`autoUpdate: false` still pins a player to what it has and disables this with it.
+
+### Fixed — a connected server showed the version it had on pairing day
+
+`peer_version` was written once, at enrollment, and never updated. A player that took a new release
+and was demonstrably running it still appeared on the parent as whatever it ran when it was paired.
+The Servers view calls that column **version skew**, which makes a frozen value worse than no value
+at all: it is the field you check to confirm a fleet took an update, and it answered with the past.
+
+It now refreshes from the peer's own reports. A report relayed from further down the tree updates
+that node, not the link it travelled over.
+
+### Fixed — a player could quietly lose the ability to see the next payload
+
+The installer recorded the payload's checksum *after* refreshing its own launcher. A player was
+found running the current release with no checksum recorded at all — and because the checksum is
+what detects a **rebuild** of an unchanged version string, that player would have kept booting
+happily while never taking another payload.
+
+The checksum is now written as soon as the tree is verified, before anything optional, and read back
+afterwards, because an empty write is otherwise indistinguishable from success. The install log also
+records the stages in between, which previously wrote nothing at all across the riskiest part of the
+update.
+
+### Known limits
+
+Unchanged from 2.0.0-alpha0 — read-only, two tiers, no content/schedules/widgets/layouts across a
+link, and both sides on 2.0.0 or newer. See that entry.
+
 ## 2.0.0-alpha1
 
 The second Node Mesh alpha. The mesh is still **off by default** and still read-only; the limits
