@@ -364,6 +364,8 @@ function refreshContentRevs(assignments) {
   }
 }
 
+const { triggersForDevice, projectTrigger } = require('../lib/device-triggers');
+
 function buildPlaylistPayload(deviceId) {
   const device = db.prepare('SELECT playlist_id, layout_id, orientation, wall_id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
 
@@ -375,6 +377,34 @@ function buildPlaylistPayload(deviceId) {
       refreshWidgetRevs(assignments);
       refreshContentRevs(assignments);
     }
+  }
+
+  /*
+   * Triggers assigned to this device, with their target playlists RESOLVED INLINE.
+   *
+   * ⚠️ Same published_snapshot path as the base playlist, and the same rev refresh — a trigger
+   * playing stale widget or content revisions would be a second, subtler staleness bug in a feature
+   * whose entire promise is that it works when nothing else can be reached.
+   */
+  let triggers = [];
+  try {
+    for (const t of triggersForDevice(db, deviceId)) {
+      let items = [];
+      if (t.target_kind === 'playlist' && t.target_ref) {
+        const pl = db.prepare('SELECT published_snapshot FROM playlists WHERE id = ?').get(t.target_ref);
+        if (pl?.published_snapshot) {
+          try { items = JSON.parse(pl.published_snapshot); } catch (e) { items = []; }
+          refreshWidgetRevs(items);
+          refreshContentRevs(items);
+        }
+      }
+      triggers.push(projectTrigger(t, items));
+    }
+  } catch (e) {
+    // A trigger resolution fault must never cost a device its playlist. Empty means "no triggers",
+    // which is the pre-feature behaviour, not a broken payload.
+    console.warn(`[trigger] could not resolve triggers for ${deviceId}: ${e && e.message}`);
+    triggers = [];
   }
 
   let layout = null;
@@ -460,7 +490,7 @@ function buildPlaylistPayload(deviceId) {
   const group_sync = wall_config ? null : resolveGroupSync(device, deviceId);
   // #104: shared shape + zone-reset tail so the device payload and the dashboard
   // preview payload (GET /api/playlists/:id/preview-payload) can never drift.
-  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', wall_config, group_sync, timezone });
+  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', wall_config, group_sync, timezone, triggers });
 }
 
 // #104: the canonical player payload shape, shared by the device path
@@ -468,7 +498,7 @@ function buildPlaylistPayload(deviceId) {
 // Zone reset: if this isn't a real multi-zone layout (single zone or no layout),
 // strip any leftover zone_id so content falls back to the fullscreen renderer
 // instead of binding to a now-gone left/right zone and never playing.
-function assemblePayload({ assignments, layout, orientation, wall_config, group_sync, timezone }) {
+function assemblePayload({ assignments, layout, orientation, wall_config, group_sync, timezone, triggers }) {
   let a = Array.isArray(assignments) ? assignments : [];
   // Transition widgets are normalized OUT here (the single device+preview chokepoint): each is dropped
   // from the visible list and its config attached as an opaque `transition` on the item it plays into.
@@ -483,6 +513,10 @@ function assemblePayload({ assignments, layout, orientation, wall_config, group_
     wall_config: wall_config || null,
     group_sync: group_sync || null,
     timezone: timezone || null,
+    // ⚠️ Top-level and NOT part of the item list, so it never enters the player's structural
+    // fingerprint. A trigger edit must not restart playback (#234); the player compares its own
+    // signature, exactly as it does for `layout`.
+    triggers: Array.isArray(triggers) ? triggers : [],
   };
 }
 

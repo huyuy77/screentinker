@@ -474,11 +474,22 @@
      * Best-effort by construction: no service worker (an insecure origin, an older BrightSign
      * build) simply means no prefetch, and playback is unchanged.
      */
-    function requestOfflineCache(items) {
+    /*
+     * @param items     the base playlist
+     * @param extraItems content that must ALSO survive, currently the assigned triggers' playlists
+     *
+     * ⚠️ extraItems IS NOT OPTIONAL POLISH. `urls` is declared to the worker as the COMPLETE set for
+     * this display, and pruneToPlaylist() deletes everything else in the content cache. So a trigger
+     * target left out of this list is not merely un-prefetched — it is actively DELETED, and the
+     * trigger then fires against nothing on precisely the day the WAN is down and the offline
+     * guarantee was the entire reason for the feature.
+     */
+    function requestOfflineCache(items, extraItems) {
       try {
         const sw = navigator.serviceWorker && navigator.serviceWorker.controller;
         if (!sw) return;
-        const urls = (items || [])
+        const all = (items || []).concat(extraItems || []);
+        const urls = all
           .filter((it) => it && it.filepath && !it.remote_url)
           .map((it) => mediaUrl(it));
         // `urls` is the COMPLETE set for this display, so the worker may treat anything else in
@@ -487,6 +498,51 @@
         // URL — it is a different URL entirely, and nothing keyed on the asset path can find it.
         sw.postMessage({ type: 'st-cache-playlist', urls, prune: true });
       } catch (e) { /* never let caching break playback */ }
+    }
+
+    /*
+     * Trigger definitions, cached like the playlist and the layout — because a trigger that needs a
+     * server to be reachable is a trigger that fails on the day it is needed. Loaded at boot, before
+     * the socket connects.
+     */
+    const TRIGGERS_CACHE_KEY = 'rd_triggers_cache' + SCREEN_SUFFIX;
+    /*
+     * ⚠️ Seeded from the cache AT DECLARATION, not later in boot — a trigger has to work on a cold
+     * start with no network, and anything that waits for the socket has already failed that. Safe
+     * ordering: TRIGGERS_CACHE_KEY is initialised on the line above, and loadTriggersCache is a
+     * hoisted function declaration, so neither is read before it exists. This file has been bricked
+     * once by a `let` read above its declaration (1.9.32), which is why that sentence is here.
+     */
+    let triggers = loadTriggersCache();
+    function saveTriggersCache(t) {
+      try { localStorage.setItem(TRIGGERS_CACHE_KEY, JSON.stringify(t || [])); } catch {}
+    }
+    function loadTriggersCache() {
+      try { return JSON.parse(localStorage.getItem(TRIGGERS_CACHE_KEY) || '[]') || []; } catch { return []; }
+    }
+    /*
+     * ⚠️ Compared by SIGNATURE, never by entering the item fingerprint. The fingerprint decides
+     * RESTART-or-not, and a trigger edit must not send the screen back to item 1 (#234). This
+     * mirrors layoutSig for exactly the same reason.
+     *
+     * The signature covers what changes behaviour — tokens, mode, timing, priority, and the identity
+     * and order of the target items — so an edit to a trigger's playlist re-pins and re-syncs, while
+     * a payload that merely rebuilt the same values is not a change.
+     */
+    function triggersSig(list) {
+      return (list || []).map((t) => [
+        t.id, t.match_token, t.clear_token || '', t.mode, t.priority || 0,
+        t.max_duration_sec || 0, t.lease_sec == null ? '' : t.lease_sec,
+        t.source_http ? 'h' : '', t.source_udp ? 'u' : '',
+        t.position || '', t.target_kind || '', t.target_ref || '',
+        (t.items || []).map((i) => (i && (i.content_id || i.widget_id || i.filepath)) || '').join('+'),
+      ].join('|')).join(',');
+    }
+    /** Every media item the assigned triggers need, flattened for pinning. */
+    function triggerItems(list) {
+      const out = [];
+      for (const t of list || []) for (const i of (t.items || [])) out.push(i);
+      return out;
     }
 
     const LAYOUT_CACHE_KEY = 'rd_layout_cache' + SCREEN_SUFFIX;
@@ -2871,6 +2927,22 @@
       saveLayoutCache(layout);
       playerTimezone = data.timezone || null; // #74/#75: effective tz for schedule eval
 
+      /*
+       * Triggers are adopted here, beside the layout and for the same reasons: they are top-level
+       * payload state, not per-item, so they get their own signature rather than joining the item
+       * fingerprint. Adopting them BEFORE the unchanged-branch early return below is deliberate — a
+       * playlist that has not changed is the common case, and it is exactly when a trigger edit
+       * would otherwise be dropped on the floor.
+       */
+      if (Array.isArray(data.triggers)) {
+        const sig = triggersSig(data.triggers);
+        if (sig !== triggersSig(triggers)) {
+          triggers = data.triggers;
+          saveTriggersCache(triggers);
+          console.log('[trigger] ' + triggers.length + ' definition(s) synced');
+        }
+      }
+
       if (newFp === oldFp && playlist.length > 0 && !wallChanged && !layoutChanged) {
         console.log('Playlist unchanged');
         /*
@@ -2963,7 +3035,10 @@
       // and a keep-set that omitted them would have the worker prune assets a zone is still
       // playing. This is also what makes the prune safe — it is the whole truth about what this
       // display needs.
-      requestOfflineCache(Array.isArray(data.assignments) ? data.assignments : playlist);
+      // ⚠️ Trigger media travels in the SAME call, because this list is declared complete and the
+      // worker prunes everything absent from it. Omitting them deletes them.
+      requestOfflineCache(Array.isArray(data.assignments) ? data.assignments : playlist,
+                          triggerItems(triggers));
       // #157: a fresh structural update supersedes any pending deferred rotation; the branches
       // below re-arm it only if the current item was removed while live in solo playback.
       deferredRotation = false;
