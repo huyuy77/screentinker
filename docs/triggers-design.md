@@ -224,13 +224,22 @@ separating from this feature: if concurrent decode does not work on an XT245, th
 layouts are already broken there today** and this design merely happens to be the first thing that
 looks. If the test shows that, it is a bug report about zones, not a trigger decision.
 
-⚠️ **The test cannot run on the XT245 as currently configured.** That box is in server mode
-(`st-config.json {"server":1}`); its widget shows the server diagnostic page and the only device
-registered to it reports `platform: "Chrome 148"` — a browser client. It is not running the player,
-so there is nothing on it to put two videos into. Testing needs the box temporarily flipped to player
-mode with a two-video layout assigned, which takes it out of the mesh-child role it currently holds.
-Testing in Chrome instead proves nothing: `videoCompositingAvailable()` returns true there, which is
-the opposite of the platform under test.
+**The test CAN run on the XT245 as it stands** — an earlier draft of this document said it could not,
+and that was wrong. Since #290 (*"Show the player on the player"*) `node-server.html` embeds the
+player in a full-screen iframe above the diagnostics whenever the server is up and an account exists.
+So a server-mode box is also a playing box. The device registered to it reporting
+`platform: "Chrome 148"` is the widget's own Chromium user agent, not a separate browser client.
+
+Testing therefore needs only a two-video layout assigned to that device on its own local server. No
+reconfiguration, no loss of the mesh-child role.
+
+⚠️ One wrinkle that makes the result *more* interesting, not less: on a server-mode box the player
+runs **inside an iframe**. Whether a hardware video plane composites correctly through an iframe
+boundary is a second unknown stacked on the first, and it applies to the base playlist today — not
+just to triggers. If the test surfaces something, separate the two questions before blaming either.
+
+Testing in desktop Chrome proves nothing either way: `videoCompositingAvailable()` returns true
+there, which is the opposite of the platform under test.
 
 Also note `videoCompositingAvailable` literally answers "can a canvas read these pixels", a *proxy*
 for the hardware plane. It is the right proxy on every platform we ship, but it is one.
