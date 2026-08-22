@@ -258,6 +258,18 @@ For the player page, which env vars cannot reach, the flags are per-device setti
 hub and cached locally so they survive WAN loss. The on-device server honours the env equivalents.
 Assigning a trigger to a screen whose listener is off warns rather than silently doing nothing.
 
+⚠️ **SETTLED: the listener lives in the PLAYER, not in an on-device server.** It was tempting to put
+the HTTP transport on the local server's existing Express listener — no new port, no binding, no
+capability probe, and the player is already connected to it over localhost. That is genuinely
+simpler, and it is wrong, because **a site may have no on-prem server at all.** Players there talk
+to a hosted hub, so with the WAN down there is no local server to receive anything. A design that
+works only where a server happens to be on site fails exactly the deployment the feature exists for.
+
+The consequence is worth stating plainly rather than discovering later: a **plain browser player
+cannot listen on a port at all**, so it gets neither transport. Triggers require a Node-capable
+player runtime — which on BrightSign means a node-enabled widget, probed by trying. §12's degradation
+is therefore the normal case for browser players, not an edge case.
+
 ### 11. Threat model: unauthenticated content injection on a LAN you do not control
 
 - Flags off by default: a site that never sets them has no listener and no open port.

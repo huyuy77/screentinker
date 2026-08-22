@@ -11,6 +11,7 @@ import * as widgets from './views/widgets.js';
 import * as videoWall from './views/video-wall.js';
 import * as reports from './views/reports.js';
 import * as servers from './views/servers.js';
+import * as triggers from './views/triggers.js';
 import * as activity from './views/activity.js';
 import * as kiosk from './views/kiosk.js';
 import * as onboarding from './views/onboarding.js';
@@ -213,6 +214,7 @@ const NAV_LABEL_KEYS = {
   walls: 'nav.walls',
   reports: 'nav.reports',
   servers: 'nav.servers',
+  triggers: 'nav.triggers',
   kiosk: 'nav.kiosk',
   designer: 'nav.designer',
   activity: 'nav.activity',
@@ -561,6 +563,9 @@ function route() {
   } else if (hash === '#/walls' || hash.startsWith('#/wall/')) {
     currentView = videoWall;
     videoWall.render(app);
+  } else if (hash === '#/triggers') {
+    currentView = triggers;
+    triggers.render(app);
   } else if (hash === '#/servers') {
     /*
      * ⚠️ Its own route, deliberately NOT behind the workspace switcher. The switcher
