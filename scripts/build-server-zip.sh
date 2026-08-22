@@ -110,6 +110,30 @@ cp brightsign/autozip.brs               "$STAGE/autozip.brs"
 fi
 
 # ---------------------------------------------------------------------------------------------
+# ⚠️ THE LAUNCHER TRAVELS AT THE TOP LEVEL, so the ordinary tree replace installs it.
+#
+# The payload used to carry these only under brightsign/server/, and the installer copied them up to
+# the root itself with fs.copyFileSync — a bespoke path its own comment called the riskiest copy in
+# the project, wrapped in a catch that reported failure to a status listener bound to localhost.
+#
+# On a real XT245 that copy silently did nothing, TWICE, and nobody could have known: the payload
+# installed, the server ran, and the launcher stayed frozen at whatever the boot zip first dropped.
+# Every launcher fix since — including the 24h update check written to solve this exact class of
+# problem — could never have reached a single box in the field.
+#
+# At the top level they are placed by the same rmSync+renameSync loop that already lands the other
+# 9,630 files, which is proven on that hardware. rename() is also the safer verb: it never opens the
+# destination, so replacing a script the running process has already require()d is atomic.
+#
+# ⚠️ autorun.brs is DELIBERATELY NOT HERE. It is the BrightScript boot entry and the recovery path
+# when a launcher is broken — "a broken launcher is not a brick" is only true while autorun.brs comes
+# from the boot zip and nothing else can overwrite it.
+if [ "$PAYLOAD_ONLY" = 1 ]; then
+  cp brightsign/server/bs-server-boot.js    "$STAGE/bs-server-boot.js"
+  cp brightsign/server/bs-payload-install.js "$STAGE/bs-payload-install.js"
+fi
+
+# ---------------------------------------------------------------------------------------------
 # Media tools, at the top level as bin/ — where stageMediaTools() in bs-server-boot.js looks
 # (path.join(__dirname, 'bin', ...), and the payload installs INTO __dirname).
 #
@@ -377,7 +401,12 @@ echo "$LISTING" | tail -1 | sed 's/^/    /'
 REQUIRED="autorun.brs autozip.brs bs-server-boot.js node-server.html"
 # The payload is verified on the thing the installer actually looks for before it commits the
 # extraction. An archive that unpacks perfectly and lacks this is the failure worth catching here.
-[ "$PAYLOAD_ONLY" = 1 ] && REQUIRED="server/server.js bin/ffprobe.gz bin/ffmpeg.gz bin/COPYING.LGPLv2.1"
+# ⚠️ bs-server-boot.js and bs-payload-install.js are REQUIRED AT THE TOP LEVEL, not just under
+# brightsign/server/. That placement is the only thing that updates the launcher on a device: it is
+# installed by the ordinary tree replace. A payload that carries them only in the subdirectory
+# installs fine, runs fine, and leaves every player's launcher frozen forever — which is exactly what
+# shipped in 2.0.0-alpha0 through alpha2 and was invisible until someone diffed a box by hand.
+[ "$PAYLOAD_ONLY" = 1 ] && REQUIRED="server/server.js bin/ffprobe.gz bin/ffmpeg.gz bin/COPYING.LGPLv2.1 bs-server-boot.js bs-payload-install.js"
 for required in $REQUIRED; do
   case "$LISTING" in
     *" $required"*) ;;

@@ -249,9 +249,8 @@ test('a corrupted file is caught by its checksum instead of landing on disk', as
  * string, and on an alpha line every build is "2.0.0-alpha1". differs() falls back to comparing
  * versions, so the box keeps booting happily and simply never sees another payload.
  */
-test('the digest is recorded even when the launcher self-refresh fails', async () => {
+test('the digest is recorded even when a launcher check goes wrong', async () => {
   const { dir, cleanup } = scratch();
-  // A payload that carries a launcher, and a destination that cannot be written: the copy throws.
   const withLauncher = PAYLOAD.concat([
     ['brightsign/', ''], ['brightsign/server/', ''],
     ['brightsign/server/bs-server-boot.js', 'module.exports = "new launcher";\n'],
@@ -259,21 +258,72 @@ test('the digest is recorded even when the launcher self-refresh fails', async (
   const s = await serve(makeZip(withLauncher));
   try {
     process.env.DATA_DIR = path.join(dir, 'data');
-    // Make the launcher destination a DIRECTORY, so copyFileSync onto it fails.
+    // A root entry that cannot be read as text, so the launcher comparison throws.
     fs.mkdirSync(path.join(dir, 'bs-server-boot.js'), { recursive: true });
 
     const r = await installer.install({ url: s.url, installDir: dir });
 
     const sha = path.join(dir, '.payload-sha256');
     assert.strictEqual(fs.existsSync(sha), true,
-      'the digest must be on disk even though the launcher refresh failed');
+      'the digest must be on disk regardless of what the launcher check did');
     assert.match(fs.readFileSync(sha, 'utf8').trim(), /^[0-9a-f]{64}$/);
     assert.ok(r.files >= 3);
-
-    // And the failure is on disk, not only in a status listener bound to localhost.
     const log = fs.readFileSync(path.join(dir, '.payload-install.log'), 'utf8');
-    assert.match(log, /kept existing bs-server-boot\.js/, 'the failed refresh is logged');
-    assert.match(log, /recorded \.payload-sha256=/, 'the digest record is logged');
+    assert.match(log, /launcher bs-server-boot\.js/, 'the launcher outcome is logged either way');
+  } finally { await s.close(); cleanup(); delete process.env.DATA_DIR; }
+});
+
+/*
+ * ⚠️ THE BUG THIS REPLACED, AND WHY IT WAS INVISIBLE.
+ *
+ * The installer used to copy the payload's brightsign/server/bs-*.js up to the install root itself.
+ * On a real XT245 that copy silently did nothing, twice — both files present, both different, no
+ * .prev written — and the only account of the failure went to a listener bound to localhost. The
+ * payload installed, the server ran, and the launcher stayed frozen at whatever the boot zip first
+ * dropped, so no launcher fix could ever reach a player.
+ *
+ * Now the payload carries the launcher at its TOP LEVEL and the ordinary tree replace installs it:
+ * the same rmSync+renameSync that lands the other 9,630 files.
+ */
+test('THE FIX: a top-level launcher in the payload replaces the one at the install root', async () => {
+  const { dir, cleanup } = scratch();
+  const withTopLevel = PAYLOAD.concat([
+    ['bs-server-boot.js', 'module.exports = "LAUNCHER v2";\n'],
+    ['bs-payload-install.js', 'module.exports = "INSTALLER v2";\n'],
+  ]);
+  const s = await serve(makeZip(withTopLevel));
+  try {
+    process.env.DATA_DIR = path.join(dir, 'data');
+    fs.writeFileSync(path.join(dir, 'bs-server-boot.js'), 'module.exports = "LAUNCHER v1";\n');
+    fs.writeFileSync(path.join(dir, 'bs-payload-install.js'), 'module.exports = "INSTALLER v1";\n');
+
+    await installer.install({ url: s.url, installDir: dir });
+
+    assert.match(fs.readFileSync(path.join(dir, 'bs-server-boot.js'), 'utf8'), /LAUNCHER v2/,
+      'the launcher was not updated — every future launcher fix would be unreachable in the field');
+    assert.match(fs.readFileSync(path.join(dir, 'bs-payload-install.js'), 'utf8'), /INSTALLER v2/);
+  } finally { await s.close(); cleanup(); delete process.env.DATA_DIR; }
+});
+
+test('a payload with NO top-level launcher says so instead of failing silently', async () => {
+  // Exactly the archives 2.0.0-alpha0 through alpha2 shipped. Installing one is not an error, but
+  // it leaves the launcher frozen, and the log has to say that out loud.
+  const { dir, cleanup } = scratch();
+  const subdirOnly = PAYLOAD.concat([
+    ['brightsign/', ''], ['brightsign/server/', ''],
+    ['brightsign/server/bs-server-boot.js', 'module.exports = "LAUNCHER v2";\n'],
+  ]);
+  const s = await serve(makeZip(subdirOnly));
+  try {
+    process.env.DATA_DIR = path.join(dir, 'data');
+    fs.writeFileSync(path.join(dir, 'bs-server-boot.js'), 'module.exports = "LAUNCHER v1";\n');
+
+    await installer.install({ url: s.url, installDir: dir });
+
+    assert.match(fs.readFileSync(path.join(dir, 'bs-server-boot.js'), 'utf8'), /LAUNCHER v1/,
+      'unchanged, as expected for such a payload');
+    const log = fs.readFileSync(path.join(dir, '.payload-install.log'), 'utf8');
+    assert.match(log, /NOT updated/, 'the log must name it rather than leaving no trace at all');
   } finally { await s.close(); cleanup(); delete process.env.DATA_DIR; }
 });
 

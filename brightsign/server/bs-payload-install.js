@@ -370,37 +370,37 @@ async function install(opts) {
   }
 
   /*
-   * ⚠️ REFRESH THE LAUNCHER TOO, or the update path can never update itself.
+   * ⚠️ THE LAUNCHER IS INSTALLED BY THE TREE REPLACE ABOVE, NOT COPIED HERE.
    *
-   * The box boots the ROOT-level bs-server-boot.js, which arrives in the boot zip. The payload
-   * carries its own copy under brightsign/server/ and never touched the root one — so a launcher
-   * shipped with an update-check could update payloads forever while remaining, itself, whatever
-   * version was first dropped on the card. Every later fix to the boot path would need somebody
-   * physically re-dropping a zip on every player.
+   * This used to fs.copyFileSync the payload's brightsign/server/bs-*.js up to the root, and it was
+   * the riskiest copy in the project by its own admission. On a real XT245 it silently did nothing,
+   * twice: both files existed, both differed, no .prev appeared, and the only account of the failure
+   * went to a status listener bound to localhost that nothing on a player can reach. The payload
+   * installed, the server ran, and the launcher stayed frozen at whatever the boot zip first
+   * dropped — so every launcher fix, including the update check written to solve this exact class of
+   * problem, could never have reached a box in the field.
    *
-   * ⚠️ THIS IS THE RISKIEST COPY IN THE PROJECT, and it is bounded deliberately: it runs only AFTER
-   * the checksum matched and server/server.js was verified present, it keeps .prev copies, and a
-   * broken launcher is NOT a brick — autorun.brs is the real boot entry, it comes from the boot zip,
-   * and it paints the diagnostic screen when the widget fails. That screen plus DWS is the recovery
-   * path, and it is the same one used to get this box onto 2.0.0-alpha0 in the first place.
+   * The payload now carries both files at its TOP LEVEL, so they are placed by the same
+   * rmSync+renameSync loop that lands the other 9,630 files and is proven on that hardware. rename()
+   * is also the safer verb: it never opens the destination, so replacing a script the running
+   * process has already require()d is atomic rather than a write into a file in use.
+   *
+   * What is left here is only the report. If a payload predates the build change its top level has
+   * no launcher, the root copy stays as it was, and the log says so instead of staying silent.
    */
   for (const name of ['bs-server-boot.js', 'bs-payload-install.js']) {
     try {
-      const from = path.join(installDir, 'brightsign', 'server', name);
-      const to = path.join(installDir, name);
-      if (!fs.existsSync(from)) continue;
-      if (fs.existsSync(to) && fs.readFileSync(from, 'utf8') === fs.readFileSync(to, 'utf8')) continue;
-      if (fs.existsSync(to)) fs.copyFileSync(to, to + '.prev');
-      fs.copyFileSync(from, to);
-      // ⚠️ note(), not say(). say() goes to a status listener bound to localhost, which is exactly
-      // the thing nobody can query on a real player — so the account of the riskiest copy in the
-      // project existed only in a process no one could reach. This whole stretch used to write
-      // NOTHING to disk between "checksum verified" and the end, which is why a real failure here
-      // left a log that simply stopped and gave no way to tell how far it had got.
-      note('refreshed ' + name);
+      const root = path.join(installDir, name);
+      if (!fs.existsSync(root)) { note('launcher ' + name + ' is MISSING from the install root'); continue; }
+      const inPayload = path.join(installDir, 'brightsign', 'server', name);
+      if (!fs.existsSync(inPayload)) continue;
+      const matches = fs.readFileSync(root, 'utf8') === fs.readFileSync(inPayload, 'utf8');
+      note(matches
+        ? 'launcher ' + name + ' is current'
+        : 'launcher ' + name + ' NOT updated — this payload carries no top-level copy, so the ' +
+          'launcher stays as it was. A payload built before the top-level change cannot update it.');
     } catch (e) {
-      // A launcher that could not be refreshed is the one we already have, which works.
-      note('kept existing ' + name + ' (' + ((e && e.message) || 'copy failed') + ')');
+      note('could not check launcher ' + name + ': ' + ((e && e.message) || 'unknown'));
     }
   }
 
