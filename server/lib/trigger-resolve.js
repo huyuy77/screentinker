@@ -140,7 +140,33 @@ function createRateLimiter({ perSec = 5, burst = 10, globalPerSec = 50 } = {}) {
   };
 }
 
-const API = { parseWire, evaluate, secretMatches, createRateLimiter, MAGIC, MAX_BYTES, TOKEN_RE };
+/**
+ * Which interface address to join the multicast group on.
+ *
+ * ⚠️ NAMING AN INTERFACE IS NOT OPTIONAL ON A MULTI-HOMED HOST. `addMembership(group)` with no
+ * interface lets the OS choose, and on a box with docker bridges, a VPN, or wired + wireless up at
+ * once it routinely picks the wrong one. The join succeeds, nothing logs, and the group is simply
+ * never received — which is indistinguishable from "the integrator never sent anything", the exact
+ * confusion §13 exists to remove.
+ *
+ * Same filter the player already uses for its reported IP: skip loopback, docker and veth, take the
+ * first real IPv4. Deterministic, so a rejoin lands on the same interface the first join used
+ * unless the address genuinely moved.
+ */
+function pickMulticastInterface(interfaces) {
+  const ifs = interfaces || {};
+  for (const name of Object.keys(ifs)) {
+    if (/^(lo|docker|veth|br-|virbr)/.test(name)) continue;
+    for (const a of ifs[name] || []) {
+      // Node 18+ reports family as 'IPv4'; older builds used the number 4.
+      if ((a.family === 'IPv4' || a.family === 4) && !a.internal) return a.address;
+    }
+  }
+  return null;
+}
+
+const API = { parseWire, evaluate, secretMatches, createRateLimiter, pickMulticastInterface,
+              MAGIC, MAX_BYTES, TOKEN_RE };
 
 /*
  * ⚠️ BOTH EXPORTS, UNCONDITIONALLY, AND NOT AS AN IF/ELSE.

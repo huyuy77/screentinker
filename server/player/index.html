@@ -2284,11 +2284,130 @@
     }
 
     /*
+     * UDP transport — ONE socket, three addressing modes.
+     *
+     * ⚠️ Unicast, subnet broadcast and multicast are NOT three code paths. A single udp4 socket
+     * bound to 0.0.0.0 receives unicast and broadcast inherently; multicast is the same socket plus
+     * an addMembership call. Splitting them would mean three places to fix the next parsing bug and
+     * three chances for them to disagree about what a valid payload is.
+     *
+     * ⚠️ OFF BY DEFAULT, and separately from HTTP. One datagram to a multicast group or a subnet
+     * broadcast reaches EVERY player on the LAN at once — a categorically larger blast radius than
+     * a unicast POST at one host, which is why the two flags are independent.
+     */
+    let triggerUdpSocket = null;
+    let triggerUdpIface = null;
+    let triggerRejoinTimer = null;
+
+    /*
+     * ⚠️ DROP THEN ADD, NOT ADD AGAIN. This is the whole reason the periodic rejoin works.
+     *
+     * The field failure this defends against is a switch doing IGMP snooping that stops forwarding
+     * the group because it missed a membership report. Nothing on the host looks wrong: the socket
+     * is bound, the membership is still held locally, and datagrams simply stop arriving.
+     *
+     * Calling addMembership() again on a group you are already in returns EADDRINUSE and emits NO
+     * fresh report — so the obvious "re-add every 90s" would be a no-op against the exact failure it
+     * was written for. Dropping first and re-adding forces a real IGMP report onto the wire.
+     *
+     * The cost is a sub-millisecond window where this host is not a member. A datagram arriving in
+     * that window is lost; the alternative is losing every datagram, permanently, with nothing in
+     * any log. That trade is why it is here and not a comment saying "TODO: verify".
+     */
+    function triggerJoinGroup(sock, group, why) {
+      let os;
+      try { os = require('os'); } catch (e) { os = null; }
+      const iface = (os && window.TriggerResolve)
+        ? window.TriggerResolve.pickMulticastInterface(os.networkInterfaces())
+        : null;
+      const m = triggerStats.multicast || (triggerStats.multicast = { rejoin_count: 0 });
+
+      try { sock.dropMembership(group, triggerUdpIface || iface || undefined); }
+      catch (e) { /* not a member yet, or the old interface is gone — both fine */ }
+
+      try {
+        sock.addMembership(group, iface || undefined);
+        triggerUdpIface = iface;
+        m.group = group; m.iface = iface; m.joined_at = Date.now(); m.last_join_error = null;
+        if (why === 'rejoin') m.rejoin_count = (m.rejoin_count || 0) + 1;
+        triggerLog('info', `joined ${group} on ${iface || '(default iface)'} (${why})`, 'join-' + why);
+      } catch (e) {
+        m.last_join_error = (e && e.message) || String(e);
+        triggerLog('warn', `could not join ${group}: ${m.last_join_error}`, 'join-fail');
+      }
+    }
+
+    function startTriggerUdp() {
+      if (!triggerConfig.accept_udp) return;
+      if (triggerUdpSocket) return;              // idempotent, same lesson as the HTTP listener
+      let dgram;
+      try { dgram = require('dgram'); } catch (e) {
+        triggerLog('info', 'no raw sockets on this platform — UDP triggers unavailable');
+        return;
+      }
+      const port = Number(triggerConfig.udp_port) || 7847;
+      const group = triggerConfig.multicast_group || '239.255.42.1';
+      try {
+        // reuseAddr so several listeners on one host (and a restart that has not released the port
+        // yet) do not lock each other out.
+        const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+
+        sock.on('message', (buf, rinfo) => {
+          handleTrigger({
+            text: buf.toString('utf8'),
+            source: 'udp',
+            sourceIp: (rinfo && rinfo.address) || 'unknown',
+          });
+        });
+        sock.on('error', (e) => {
+          triggerLog('warn', 'UDP trigger socket error: ' + ((e && e.message) || e));
+          if (triggerUdpSocket === sock) {
+            triggerUdpSocket = null;
+            triggerStats.listeners.udp = false;
+            try { if (triggerRejoinTimer) clearInterval(triggerRejoinTimer); } catch (e2) {}
+            triggerRejoinTimer = null;
+          }
+        });
+
+        triggerUdpSocket = sock;
+        sock.bind(port, '0.0.0.0', () => {
+          try { sock.setBroadcast(true); } catch (e) { /* not fatal: unicast + multicast still work */ }
+          // ⚠️ TTL 1: a trigger is a local-site event. Letting it cross a router is a way to change
+          // screens in a building nobody meant to address.
+          try { sock.setMulticastTTL(1); } catch (e) { /* older stacks */ }
+          triggerStats.listeners.udp = port;
+          triggerJoinGroup(sock, group, 'bind');
+
+          /*
+           * Two rejoin mechanisms, because they cover different failures:
+           *   - the TIMER is the backstop for silent snooping loss, which no host-side signal
+           *     reports at all;
+           *   - the INTERFACE WATCH is the fast path for DHCP renewal, link flap and wake, where
+           *     the address genuinely moved and the old membership is on an interface that is gone.
+           */
+          triggerRejoinTimer = setInterval(() => {
+            let os; try { os = require('os'); } catch (e) { return; }
+            const now = window.TriggerResolve
+              ? window.TriggerResolve.pickMulticastInterface(os.networkInterfaces()) : null;
+            triggerJoinGroup(sock, group, now !== triggerUdpIface ? 'iface-changed' : 'rejoin');
+          }, 90000);
+          if (triggerRejoinTimer && triggerRejoinTimer.unref) triggerRejoinTimer.unref();
+
+          triggerLog('info', `UDP trigger listener on :${port} (unicast + broadcast + ${group})`);
+        });
+      } catch (e) {
+        triggerLog('info', 'could not start the UDP trigger listener: ' + ((e && e.message) || e));
+        triggerUdpSocket = null;
+      }
+    }
+
+    /*
      * ⚠️ BOOT FROM THE CACHE, before the socket connects. A site whose WAN is down comes up with
      * exactly what it had: definitions, pinned media, and a listener. Waiting for a sync would mean
      * triggers only work once the internet does, which is the opposite of the requirement.
      */
     try { startTriggerHttp(); } catch (e) { /* never let a listener break playback */ }
+    try { startTriggerUdp(); } catch (e) { /* ditto */ }
 
     // ==================== PiP overlay (#109) ====================
     // Single overlay slot, last-show-wins; duration timer (0 = until cleared); pip-clear
@@ -2414,6 +2533,9 @@
        */
       if (typeof triggerStats === 'object' && triggerStats.listeners && triggerStats.listeners.http) {
         caps.push('trigger.http');
+      }
+      if (typeof triggerStats === 'object' && triggerStats.listeners && triggerStats.listeners.udp) {
+        caps.push('trigger.udp');
       }
 
       // Transitions are a progressive enhancement — the bundle failing to load means hard cuts,
@@ -3190,12 +3312,14 @@
        */
       if (data.trigger_config && JSON.stringify(data.trigger_config) !== JSON.stringify(triggerConfig)) {
         const wasHttp = !!triggerConfig.accept_http;
+        const wasUdp = !!triggerConfig.accept_udp;
         triggerConfig = data.trigger_config;
         saveTriggerConfig(triggerConfig);
         // ⚠️ Only START on a change. A listener already bound must not be rebound on every poll,
         // and turning one OFF needs a restart rather than a half-torn-down socket — said plainly
         // because "it stopped listening but the port is still held" is the worst of both.
         if (!wasHttp && triggerConfig.accept_http) startTriggerHttp();
+        if (!wasUdp && triggerConfig.accept_udp) startTriggerUdp();
         else if (wasHttp && !triggerConfig.accept_http) {
           triggerLog('warn', 'HTTP triggers disabled — the listener stops at the next restart');
         }
