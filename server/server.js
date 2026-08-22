@@ -566,6 +566,13 @@ app.get('/player/wall-geometry.js', (req, res) => {
   res.sendFile(path.join(__dirname, 'lib', 'wall-geometry.js'));
 });
 
+// Trigger wire parsing + token resolution, shared with Node so the fire path is testable outside
+// a 5,000-line HTML file. See docs/triggers-design.md.
+app.get('/player/trigger-resolve.js', (req, res) => {
+  res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'lib', 'trigger-resolve.js'));
+});
+
 app.get('/player/media-mute.js', (req, res) => {
   res.type('application/javascript').setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'lib', 'media-mute.js'));

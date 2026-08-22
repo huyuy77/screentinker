@@ -1110,6 +1110,19 @@ const migrations = [
       * app-side on device/group delete; the resolver's guard is what makes a missed cleanup
       * harmless instead of a crash. */
    )`,
+  /* Per-device trigger listener settings. ⚠️ Deliberately NOT on the trigger: enabling a trigger is
+   * a content decision, opening a listening port on the LAN is a security one, and one must not
+   * imply the other. Both default OFF, matching MESH_ACCEPT_ENROLLMENT / MESH_ALLOW_UPLINK. */
+  'ALTER TABLE devices ADD COLUMN triggers_accept_http INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE devices ADD COLUMN triggers_accept_udp INTEGER NOT NULL DEFAULT 0',
+  /* The shared secret every payload must carry. Per device so a compromise is one screen, and
+   * rotatable without touching a trigger definition. */
+  'ALTER TABLE devices ADD COLUMN trigger_secret TEXT',
+  'ALTER TABLE devices ADD COLUMN trigger_http_port INTEGER',
+  'ALTER TABLE devices ADD COLUMN trigger_udp_port INTEGER',
+  'ALTER TABLE devices ADD COLUMN trigger_multicast_group TEXT',
+  'ALTER TABLE devices ADD COLUMN trigger_clear_all_token TEXT',
+
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_triggers_token ON triggers (workspace_id, match_token)`,
   `CREATE INDEX IF NOT EXISTS idx_triggers_ws     ON triggers (workspace_id)`,
   `CREATE INDEX IF NOT EXISTS idx_trigger_assign  ON trigger_assignments (target_type, target_id)`,

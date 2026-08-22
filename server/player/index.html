@@ -281,6 +281,7 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="/player/schedule-eval.js"></script>
+  <script src="/player/trigger-resolve.js"></script>
   <script src="/player/media-mute.js"></script>
   <script src="/player/orientation-style.js"></script>
   <script src="/player/wall-geometry.js"></script>
@@ -514,6 +515,19 @@
      * once by a `let` read above its declaration (1.9.32), which is why that sentence is here.
      */
     let triggers = loadTriggersCache();
+    /*
+     * Listener settings, cached for the same reason the definitions are: a player that has to reach
+     * a server before it can accept a trigger has already failed the offline promise. Defaults are
+     * OFF, so a device that has never been told otherwise listens on nothing.
+     */
+    const TRIGGER_CFG_KEY = 'rd_trigger_cfg' + SCREEN_SUFFIX;
+    let triggerConfig = (function () {
+      try { return JSON.parse(localStorage.getItem(TRIGGER_CFG_KEY) || 'null') || {}; }
+      catch (e) { return {}; }
+    })();
+    function saveTriggerConfig(c) {
+      try { localStorage.setItem(TRIGGER_CFG_KEY, JSON.stringify(c || {})); } catch (e) {}
+    }
     function saveTriggersCache(t) {
       try { localStorage.setItem(TRIGGERS_CACHE_KEY, JSON.stringify(t || [])); } catch {}
     }
@@ -2045,6 +2059,237 @@
       socket.on('device:pip-clear', (data) => pipClear(data && data.pip_id));
     }
 
+    // ==================== Triggers (docs/triggers-design.md) ====================
+    /*
+     * Externally-fired interrupt content, resolved HERE and nowhere else.
+     *
+     * ⚠️ The fire path never contacts the hub. Definitions arrived at sync time and are cached in
+     * localStorage; the target playlist's media is pinned by the same message that pins the base
+     * playlist. With the WAN down every part of this still works, which is the entire feature.
+     *
+     * Step 4 scope: one internal handler, both doors, HTTP transport. Priority, the held set and
+     * the lease are step 6 — until then a fire is last-wins, which is the same rule the manual PiP
+     * path has always used, so the behaviour is at least consistent rather than half a policy.
+     */
+    let triggerActive = null;                 // { trigger, mode, since, source }
+    let triggerTimers = {};                   // its OWN store — clearZoneTimers() must not reach it
+    let triggerCapTimer = null;
+    const triggerStats = {
+      received: 0, accepted: 0,
+      rejected: { bad_magic: 0, malformed: 0, bad_secret: 0, unknown_token: 0, too_large: 0, rate_limited: 0 },
+      last_datagram_at: null, listeners: {},
+    };
+    const triggerLimiter = window.TriggerResolve
+      ? window.TriggerResolve.createRateLimiter({ perSec: 5, burst: 10, globalPerSec: 50 })
+      : null;
+    /* ⚠️ One line per reason per window. A packet flood must not become a log flood — the same
+     * lesson as the [content-ack] shedding fix. */
+    const triggerLogged = {};
+    function triggerLog(level, msg, key) {
+      if (key) {
+        const now = Date.now();
+        if (triggerLogged[key] && now - triggerLogged[key] < 10000) return;
+        triggerLogged[key] = now;
+      }
+      try { window.__debugLog_push && window.__debugLog_push({ type: 'trigger', level, msg }); } catch (e) {}
+      try { console[level === 'warn' ? 'warn' : 'log']('[trigger] ' + msg); } catch (e) {}
+      try {
+        if (socket?.connected && config.deviceId) {
+          socket.emit('device:log', { device_id: config.deviceId, tag: 'trigger', level, message: msg });
+        }
+      } catch (e) {}
+    }
+
+    function triggerStop(reason) {
+      try { if (triggerCapTimer) clearTimeout(triggerCapTimer); } catch (e) {}
+      triggerCapTimer = null;
+      for (const k in triggerTimers) { try { clearTimeout(triggerTimers[k]); } catch (e) {} }
+      triggerTimers = {};
+      const was = triggerActive;
+      triggerActive = null;
+      const c = document.getElementById('pipContainer');
+      if (c) c.innerHTML = '';
+      if (was) triggerLog('info', `cleared "${was.trigger.name}" (${reason})`);
+    }
+
+    /*
+     * Render a trigger's playlist into the overlay layer.
+     *
+     * ⚠️ Reuses showZoneItem — the SAME rotation engine the base playlist and every layout zone use
+     * — with its own container and its own timer store. Not a second renderer: per-item durations,
+     * video-on-end advance and per-item scheduling all come free, and there is one place where a
+     * rendering bug can live rather than two.
+     *
+     * ⚠️ It composites over base video rather than preempting it. Verified on an XT245 (BOS 10.0.16)
+     * on 2026-08-22: two simultaneous decodes, both advancing, both composited. See §9.
+     */
+    function triggerFire(trigger, source) {
+      const container = document.getElementById('pipContainer');
+      if (!container) return;
+      const items = Array.isArray(trigger.items) ? trigger.items : [];
+      if (!items.length) {
+        // A fire against nothing is the failure the pinning work exists to prevent, so it is loud.
+        triggerLog('warn', `"${trigger.name}" fired but its playlist is empty on this device`);
+        return;
+      }
+      triggerStop('superseded');
+
+      const box = document.createElement('div');
+      box.className = 'trigger-box';
+      box.style.cssText = 'position:absolute;inset:0;background:#000;overflow:hidden;';
+      container.appendChild(box);
+
+      triggerActive = { trigger, mode: trigger.mode, since: Date.now(), source };
+      showZoneItem({ id: '__trigger__' }, box, items, 0, triggerTimers);
+
+      /*
+       * `once` = play the playlist through once. max_duration_sec is an UPPER BOUND, not the
+       * primary control, and 0 means no cap. ⚠️ Deliberately unlike the PiP `duration` field where
+       * 0 means "until cleared" — hence the different name. The cap wins over a longer playlist,
+       * because a safety valve that defers to the thing it is guarding is not a safety valve.
+       */
+      const cap = Number(trigger.max_duration_sec) || 0;
+      if (trigger.mode === 'once' && cap > 0) {
+        const need = items.reduce((n, i) => n + (Number(i.duration_sec) || 10), 0);
+        if (need > cap) triggerLog('warn', `"${trigger.name}" capped at ${cap}s (playlist needs ${need}s)`);
+        triggerCapTimer = setTimeout(() => triggerStop('cap reached'), cap * 1000);
+      }
+      triggerLog('info', `fired "${trigger.name}" via ${source} (${trigger.mode}, ${items.length} item(s))`);
+    }
+
+    /**
+     * The ONE handler. Both transports arrive here; neither has logic of its own.
+     */
+    function handleTrigger({ text, source, sourceIp }) {
+      triggerStats.received++;
+      triggerStats.last_datagram_at = Date.now();   // ⚠️ counted even when rejected — see below
+      const TRcore = window.TriggerResolve;
+      if (!TRcore) return { ok: false, reason: 'malformed' };
+
+      if (triggerLimiter && !triggerLimiter.allow(sourceIp || 'unknown', Date.now())) {
+        triggerStats.rejected.rate_limited++;
+        triggerLog('warn', `rate limited from ${sourceIp || 'unknown'}`, 'rate_limited');
+        return { ok: false, reason: 'rate_limited' };
+      }
+
+      const verdict = TRcore.evaluate({
+        text, triggers, source,
+        deviceSecret: triggerConfig.secret || '',
+        clearAllToken: triggerConfig.clear_all_token || null,
+      });
+
+      if (!verdict.ok) {
+        if (triggerStats.rejected[verdict.reason] !== undefined) triggerStats.rejected[verdict.reason]++;
+        // bad_magic is broadcast noise and is NOT logged per packet — on a busy LAN that alone
+        // would fill the ring buffer and push out everything worth reading.
+        if (verdict.reason !== 'bad_magic') {
+          triggerLog('warn', `refused from ${sourceIp || '?'}: ${verdict.reason}`, verdict.reason);
+        }
+        return verdict;
+      }
+
+      triggerStats.accepted++;
+      if (verdict.action === 'clear_all') triggerStop('clear-all');
+      else if (verdict.action === 'clear') {
+        if (triggerActive && triggerActive.trigger.id === verdict.trigger.id) triggerStop('cleared');
+        else triggerLog('info', `clear for "${verdict.trigger.name}" but it is not showing`);
+      } else if (verdict.action === 'fire') {
+        /*
+         * ⚠️ A RE-FIRE OF THE ALREADY-ACTIVE TRIGGER IS A NO-OP, NOT A RESTART. Crestron and PLC
+         * gear re-assert state on a timer, and subnet broadcast duplicates packets anyway. If every
+         * repeat restarted the overlay, a sender re-asserting every 5s would freeze a 6-item
+         * emergency loop on item 1 forever — and it would look like the playlist was broken rather
+         * than like the sender was chatty. (Step 6: this is also where the lease renews.)
+         */
+        if (triggerActive && triggerActive.trigger.id === verdict.trigger.id) {
+          triggerLog('info', `re-fire of "${verdict.trigger.name}" — already showing, not restarted`,
+                     're-fire-' + verdict.trigger.id);
+        } else {
+          triggerFire(verdict.trigger, source);
+        }
+      }
+      return verdict;
+    }
+
+    /*
+     * HTTP transport.
+     *
+     * ⚠️ PROBED BY TRYING, NEVER INFERRED FROM THE PLATFORM. A browser tab cannot bind a port at
+     * all; a node-enabled BrightSign widget can. Requiring http and actually listening either works
+     * or it does not, and the capability is declared only on success — the same rule as
+     * declaredCapabilities() ("a capability we cannot verify is left out") and the same lesson as
+     * read-runner.js detecting worker_threads by construction rather than by version sniffing.
+     *
+     * ⚠️ OFF BY DEFAULT. This opens a listening port on the LAN that changes what a screen shows.
+     */
+    let triggerHttpServer = null;
+    function startTriggerHttp() {
+      if (!triggerConfig.accept_http) return;
+      /*
+       * ⚠️ IDEMPOTENT. This is called at boot AND whenever the config changes, so without a guard
+       * the second call races the first: it binds the same port, gets EADDRINUSE, and its error
+       * handler marks the listener DOWN — while the original is up and serving. Found by firing at
+       * it: `listeners.http` read false with a working listener behind it, which would have hidden
+       * the capability and made the one diagnostic an installer trusts say the opposite of the truth.
+       */
+      if (triggerHttpServer) return;
+      let http;
+      try { http = require('http'); } catch (e) {
+        triggerLog('info', 'no raw HTTP on this platform — trigger HTTP listener not started');
+        return;
+      }
+      const port = Number(triggerConfig.http_port) || 8079;
+      try {
+        const srv = http.createServer((req, res) => {
+          if (req.method !== 'POST') { res.writeHead(405).end(); return; }
+          let body = '';
+          req.on('data', (c) => {
+            body += c;
+            // Bound the read: an endless body must not become memory pressure on a player.
+            if (body.length > 4096) { req.destroy(); }
+          });
+          req.on('end', () => {
+            let text = body;
+            // Accept the raw line OR a JSON envelope, because some gear can only POST a string and
+            // some can only POST JSON. Same wire format underneath either way.
+            try {
+              const j = JSON.parse(body);
+              if (j && typeof j === 'object' && j.token) {
+                text = 'ST1 ' + (j.secret || '') + ' ' + j.token;
+              }
+            } catch (e) { /* not JSON: it is the raw line */ }
+            const v = handleTrigger({
+              text: String(text || '').trim(),
+              source: 'http',
+              sourceIp: (req.socket && req.socket.remoteAddress) || 'unknown',
+            });
+            res.writeHead(v.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(v.ok ? { ok: true, action: v.action } : { ok: false, error: v.reason }));
+          });
+        });
+        srv.on('error', (e) => {
+          triggerLog('warn', 'trigger HTTP listener failed: ' + ((e && e.message) || e));
+          // Only report DOWN if this attempt was the one holding the port. A failed duplicate must
+          // not overwrite the state of a listener that is working.
+          if (triggerHttpServer === srv) { triggerHttpServer = null; triggerStats.listeners.http = false; }
+        });
+        triggerHttpServer = srv;
+        srv.listen(port, () => {
+          triggerStats.listeners.http = port;
+          triggerLog('info', 'HTTP trigger listener on :' + port);
+        });
+      } catch (e) {
+        triggerLog('info', 'could not start the trigger HTTP listener: ' + ((e && e.message) || e));
+      }
+    }
+
+    /*
+     * ⚠️ BOOT FROM THE CACHE, before the socket connects. A site whose WAN is down comes up with
+     * exactly what it had: definitions, pinned media, and a listener. Waiting for a sync would mean
+     * triggers only work once the internet does, which is the opposite of the requirement.
+     */
+    try { startTriggerHttp(); } catch (e) { /* never let a listener break playback */ }
+
     // ==================== PiP overlay (#109) ====================
     // Single overlay slot, last-show-wins; duration timer (0 = until cleared); pip-clear
     // (id-aware) or timer tears down. Renders into #pipContainer, never the player. Mirrors
@@ -2161,6 +2406,15 @@
         'system.restart_player',
         'sync.clock',
       ];
+
+      /*
+       * ⚠️ Declared from the BOUND LISTENER, not from the flag or the platform. A flag that is on
+       * and a port that never bound are different facts, and the operator picking screens for an
+       * integrator needs the second one. Same rule as offline.cache: claim what was verified.
+       */
+      if (typeof triggerStats === 'object' && triggerStats.listeners && triggerStats.listeners.http) {
+        caps.push('trigger.http');
+      }
 
       // Transitions are a progressive enhancement — the bundle failing to load means hard cuts,
       // not a broken player — so this reflects whether the runtime actually loaded.
@@ -2934,6 +3188,18 @@
        * playlist that has not changed is the common case, and it is exactly when a trigger edit
        * would otherwise be dropped on the floor.
        */
+      if (data.trigger_config && JSON.stringify(data.trigger_config) !== JSON.stringify(triggerConfig)) {
+        const wasHttp = !!triggerConfig.accept_http;
+        triggerConfig = data.trigger_config;
+        saveTriggerConfig(triggerConfig);
+        // ⚠️ Only START on a change. A listener already bound must not be rebound on every poll,
+        // and turning one OFF needs a restart rather than a half-torn-down socket — said plainly
+        // because "it stopped listening but the port is still held" is the worst of both.
+        if (!wasHttp && triggerConfig.accept_http) startTriggerHttp();
+        else if (wasHttp && !triggerConfig.accept_http) {
+          triggerLog('warn', 'HTTP triggers disabled — the listener stops at the next restart');
+        }
+      }
       if (Array.isArray(data.triggers)) {
         const sig = triggersSig(data.triggers);
         if (sig !== triggersSig(triggers)) {

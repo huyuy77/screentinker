@@ -139,3 +139,69 @@ test('the signature covers the target items, so editing the trigger playlist re-
   assert.equal(triggersSig(a), triggersSig(JSON.parse(JSON.stringify(a))),
     'a rebuilt-but-identical payload is not a change');
 });
+
+/*
+ * Step 4 wiring, asserted against the shipped player source.
+ *
+ * ⚠️ These are structural claims that a unit test cannot reach — the fire path lives inside a page
+ * that needs a DOM, a socket and a rotation engine to run. What CAN be pinned down is that the two
+ * transports converge, that the listener is off by default, and that the offline promise is kept at
+ * boot. Each of these has a specific way of silently rotting.
+ */
+test('⚠️ both transports converge on ONE handler', () => {
+  // If a transport ever grows its own resolution, the two doors drift and only one gets the next
+  // security fix. The HTTP listener must call handleTrigger and nothing else.
+  const http = PLAYER.slice(PLAYER.indexOf('function startTriggerHttp'),
+                            PLAYER.indexOf('// ==================== PiP overlay'));
+  assert.match(http, /handleTrigger\(\{/, 'the HTTP path must go through the shared handler');
+  assert.doesNotMatch(http, /TriggerResolve\.evaluate/,
+    'the transport is deciding for itself instead of calling the handler');
+});
+
+test('⚠️ the HTTP listener is OFF unless the device was told otherwise', () => {
+  const http = PLAYER.slice(PLAYER.indexOf('function startTriggerHttp'));
+  assert.match(http.slice(0, 400), /if \(!triggerConfig\.accept_http\) return;/,
+    'a listening port that changes what is on a screen must not default to open');
+});
+
+test('⚠️ the listener boots from the CACHE, not from a sync', () => {
+  // A player that must reach a server before it will accept a trigger has already failed the one
+  // requirement this feature exists for.
+  assert.match(PLAYER, /try \{ startTriggerHttp\(\); \} catch/);
+  assert.match(PLAYER, /let triggerConfig = \(function \(\) \{/);
+});
+
+test('the trigger rotation owns its timers, so a layout change cannot freeze it', () => {
+  const fire = PLAYER.slice(PLAYER.indexOf('function triggerFire'), PLAYER.indexOf('function handleTrigger'));
+  assert.match(fire, /showZoneItem\(\{ id: '__trigger__' \}, box, items, 0, triggerTimers\)/,
+    'the overlay must pass its own timer store — see player-zone-timer-isolation');
+});
+
+test('⚠️ a re-fire of the already-active trigger does not restart it', () => {
+  // PLC and Crestron gear re-assert on a timer; broadcast duplicates packets. A restart per repeat
+  // would freeze a multi-item emergency loop on item 1 for as long as the sender keeps talking.
+  const h = PLAYER.slice(PLAYER.indexOf('function handleTrigger'), PLAYER.indexOf('function startTriggerHttp'));
+  assert.match(h, /already showing, not restarted/);
+});
+
+test('⚠️ broadcast noise is not logged per packet', () => {
+  // bad_magic is every stray datagram on the LAN. Logging each one fills the ring buffer and pushes
+  // out the lines worth reading — the [content-ack] shedding lesson.
+  const h = PLAYER.slice(PLAYER.indexOf('function handleTrigger'), PLAYER.indexOf('function startTriggerHttp'));
+  assert.match(h, /verdict\.reason !== 'bad_magic'/);
+});
+
+test('⚠️ last_datagram_at counts REJECTED traffic too', () => {
+  // The single most valuable diagnostic in the feature: recent timestamp with zero accepts means
+  // packets are arriving and the secret is wrong; null means nothing is arriving and it is the
+  // network. Incrementing it only on success would destroy that distinction.
+  const h = PLAYER.slice(PLAYER.indexOf('function handleTrigger'), PLAYER.indexOf('function startTriggerHttp'));
+  const beforeVerdict = h.slice(0, h.indexOf('const verdict'));
+  assert.match(beforeVerdict, /last_datagram_at = Date\.now\(\)/,
+    'it must be stamped before the verdict, or a rejected packet looks like no packet');
+});
+
+test('the capability is declared from the BOUND listener, not from the flag', () => {
+  assert.match(PLAYER, /triggerStats\.listeners && triggerStats\.listeners\.http\)\s*\{\s*caps\.push\('trigger\.http'\)/s,
+    'a flag that is on and a port that never bound are different facts');
+});

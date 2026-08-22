@@ -367,7 +367,10 @@ function refreshContentRevs(assignments) {
 const { triggersForDevice, projectTrigger } = require('../lib/device-triggers');
 
 function buildPlaylistPayload(deviceId) {
-  const device = db.prepare('SELECT playlist_id, layout_id, orientation, wall_id, timezone, reported_timezone FROM devices WHERE id = ?').get(deviceId);
+  const device = db.prepare(`SELECT playlist_id, layout_id, orientation, wall_id, timezone, reported_timezone,
+      triggers_accept_http, triggers_accept_udp, trigger_secret, trigger_http_port,
+      trigger_udp_port, trigger_multicast_group, trigger_clear_all_token
+      FROM devices WHERE id = ?`).get(deviceId);
 
   let assignments = [];
   if (device?.playlist_id) {
@@ -406,6 +409,22 @@ function buildPlaylistPayload(deviceId) {
     console.warn(`[trigger] could not resolve triggers for ${deviceId}: ${e && e.message}`);
     triggers = [];
   }
+
+  /*
+   * ⚠️ THE LISTENER SETTINGS ARE SEPARATE FROM THE TRIGGER DEFINITIONS, and travel beside them.
+   * Assigning a trigger is a content decision; opening a port on the LAN that changes what a screen
+   * shows is a security one. Sending them together but keeping them distinct is what lets the UI
+   * warn "this screen will not receive triggers" instead of silently doing nothing.
+   */
+  const trigger_config = {
+    accept_http: !!device?.triggers_accept_http,
+    accept_udp: !!device?.triggers_accept_udp,
+    secret: device?.trigger_secret || null,
+    http_port: device?.trigger_http_port || null,
+    udp_port: device?.trigger_udp_port || null,
+    multicast_group: device?.trigger_multicast_group || null,
+    clear_all_token: device?.trigger_clear_all_token || null,
+  };
 
   let layout = null;
   if (device?.layout_id) {
@@ -490,7 +509,7 @@ function buildPlaylistPayload(deviceId) {
   const group_sync = wall_config ? null : resolveGroupSync(device, deviceId);
   // #104: shared shape + zone-reset tail so the device payload and the dashboard
   // preview payload (GET /api/playlists/:id/preview-payload) can never drift.
-  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', wall_config, group_sync, timezone, triggers });
+  return assemblePayload({ assignments, layout, orientation: device?.orientation || 'landscape', wall_config, group_sync, timezone, triggers, trigger_config });
 }
 
 // #104: the canonical player payload shape, shared by the device path
@@ -498,7 +517,7 @@ function buildPlaylistPayload(deviceId) {
 // Zone reset: if this isn't a real multi-zone layout (single zone or no layout),
 // strip any leftover zone_id so content falls back to the fullscreen renderer
 // instead of binding to a now-gone left/right zone and never playing.
-function assemblePayload({ assignments, layout, orientation, wall_config, group_sync, timezone, triggers }) {
+function assemblePayload({ assignments, layout, orientation, wall_config, group_sync, timezone, triggers, trigger_config }) {
   let a = Array.isArray(assignments) ? assignments : [];
   // Transition widgets are normalized OUT here (the single device+preview chokepoint): each is dropped
   // from the visible list and its config attached as an opaque `transition` on the item it plays into.
@@ -517,6 +536,7 @@ function assemblePayload({ assignments, layout, orientation, wall_config, group_
     // fingerprint. A trigger edit must not restart playback (#234); the player compares its own
     // signature, exactly as it does for `layout`.
     triggers: Array.isArray(triggers) ? triggers : [],
+    trigger_config: trigger_config || null,
   };
 }
 
