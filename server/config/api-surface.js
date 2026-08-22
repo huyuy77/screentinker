@@ -37,6 +37,11 @@ const PUBLIC_ROUTERS = [
   { path: '/api/activity',    mod: './routes/activity' },
   { path: '/api/kiosk',       mod: './routes/kiosk', renderBypass: true },
   { path: '/api/pip',         mod: './routes/pip' },
+  // Trigger DEFINITIONS. ⚠️ Public (token-reachable) on purpose — an integrator provisioning a site
+  // configures these from their own tooling. The FIRE path is not here and never will be: it lives
+  // on the device, because a trigger that needs this server is a trigger that fails with the WAN
+  // down, which is the whole feature. See docs/triggers-design.md.
+  { path: '/api/triggers',    mod: './routes/triggers' },
 ];
 
 const JWT_ONLY_ROUTERS = [

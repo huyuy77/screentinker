@@ -1051,6 +1051,69 @@ const migrations = [
   `CREATE INDEX IF NOT EXISTS idx_mesh_edges_client ON mesh_edges (client_id)`,
   `CREATE INDEX IF NOT EXISTS idx_mesh_tomb_origin  ON mesh_tombstones (origin_node_id, object_type)`,
 
+  /* ==============================================================================================
+   * TRIGGERS — externally-fired interrupt content, resolved on the device. docs/triggers-design.md
+   *
+   * ⚠️ The whole point is that this works with the WAN down, so nothing here is consulted at fire
+   * time: these rows are the DEFINITION, synced to the device and answered from its local copy.
+   * ============================================================================================ */
+  `CREATE TABLE IF NOT EXISTS triggers (
+     id               TEXT PRIMARY KEY,
+     workspace_id     TEXT NOT NULL,
+     name             TEXT NOT NULL,
+     /* The string an external system sends. Unique per workspace so one token cannot resolve to two
+      * different overlays depending on which row is read first. */
+     match_token      TEXT NOT NULL,
+     clear_token      TEXT,
+     source_http      INTEGER NOT NULL DEFAULT 1,
+     source_udp       INTEGER NOT NULL DEFAULT 0,
+     /* ⚠️ target_kind + target_ref is the no-migration hook. v1 writes 'playlist' + a playlist id;
+      * 'url' + target_url is the later addition and needs no schema change to land. The v1 target is
+      * a PLAYLIST precisely because playlist items are library content and therefore pinnable — an
+      * arbitrary URL cannot be, which would break the offline guarantee at the only moment it
+      * matters. See §1 of the design. */
+     target_kind      TEXT NOT NULL DEFAULT 'playlist',
+     target_ref       TEXT,
+     target_url       TEXT,
+     position         TEXT NOT NULL DEFAULT 'center',
+     width            INTEGER, height INTEGER, opacity REAL, border_radius INTEGER,
+     mode             TEXT NOT NULL DEFAULT 'once',
+     /* ⚠️ max_duration_sec, NOT duration_sec. The PiP contract already uses a duration field where 0 means
+      * "until cleared"; here 0 means "no cap". Two adjacent fields where the same value means
+      * opposite things is a trap, so the name differs because the semantics do. */
+     max_duration_sec INTEGER,
+     /* until_cleared only. A clear is one unacked datagram, so a lost clear strands the screen.
+      * Senders re-assert on a timer, and each matching re-fire renews this. NULL = hold
+      * indefinitely, which is the pre-lease behaviour, so it stays opt-in. */
+     lease_sec        INTEGER,
+     priority         INTEGER NOT NULL DEFAULT 0,
+     enabled          INTEGER NOT NULL DEFAULT 1,
+     created_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     updated_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     /* Declared inline, like org_sso_*, rather than retrofitted later: WS_CASCADE_TABLES exists to
+      * fix tables born without the action, and a new table has no reason to join that queue.
+      * foreign_keys is ON (see the pragma at the top of this file), so this actually fires. */
+     FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+   )`,
+  /* Definitions are org-scoped and ASSIGNED to screens or groups — per-screen definitions do not
+   * survive a 40-screen deployment. */
+  `CREATE TABLE IF NOT EXISTS trigger_assignments (
+     trigger_id  TEXT NOT NULL,
+     target_type TEXT NOT NULL CHECK (target_type IN ('device','group')),
+     target_id   TEXT NOT NULL,
+     created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+     PRIMARY KEY (trigger_id, target_type, target_id),
+     FOREIGN KEY (trigger_id) REFERENCES triggers(id) ON DELETE CASCADE
+     /* ⚠️ target_id is POLYMORPHIC (a device or a group), so it cannot carry an FK. Deleting a
+      * device or group therefore leaves an assignment row behind, and the resolver must treat a
+      * dangling assignment as "not assigned" rather than trusting the row exists. Cleaned up
+      * app-side on device/group delete; the resolver's guard is what makes a missed cleanup
+      * harmless instead of a crash. */
+   )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_triggers_token ON triggers (workspace_id, match_token)`,
+  `CREATE INDEX IF NOT EXISTS idx_triggers_ws     ON triggers (workspace_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_trigger_assign  ON trigger_assignments (target_type, target_id)`,
+
 ];
 // Apply each ALTER idempotently. A "duplicate column name" / "already exists"
 // error means the column is already present (expected on a migrated DB) - benign.

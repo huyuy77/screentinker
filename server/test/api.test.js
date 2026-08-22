@@ -142,6 +142,12 @@ test('partition: the public token surface is exactly the reviewed set (snapshot 
     '/api/devices', '/api/content', '/api/folders', '/api/assignments', '/api/layouts',
     '/api/widgets', '/api/schedules', '/api/walls', '/api/reports', '/api/groups',
     '/api/playlists', '/api/activity', '/api/kiosk', '/api/pip',
+    // Trigger DEFINITIONS, added deliberately: an AV integrator provisioning a site configures these
+    // from their own tooling, so the token door is the point. Writes carry the same requireScope
+    // ('full') + role pairing as /api/pip, and reads are workspace-scoped like every sibling.
+    // ⚠️ The FIRE path is NOT here — it is device-local, because a trigger that needs this server is
+    // a trigger that fails with the WAN down. See docs/triggers-design.md.
+    '/api/triggers',
   ].sort();
   assert.deepEqual(PUBLIC_ROUTERS.map(r => r.path).sort(), EXPECTED_PUBLIC);
 });
