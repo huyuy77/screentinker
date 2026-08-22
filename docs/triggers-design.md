@@ -195,54 +195,43 @@ overlay, a sender re-asserting every 5s would freeze a 6-item emergency loop on 
 it would look like the playlist was broken, not like the sender was chatty. A repeat renews the lease
 (§6) and changes nothing else.
 
-### 9. Decoder contention: detection is settled, policy is not
+### 9. Decoder contention: TESTED ON HARDWARE — composite, do not preempt
 
-`videoCompositingAvailable()` already answers *"does this platform put video on a hardware plane"*
-with a cached 16×16 alpha probe, verified on the XT245. With the existing `kind` computation:
+⚠️ **RESOLVED 2026-08-22 on the XT245 (BOS 10.0.16). Two simultaneous video decodes work.** The
+preempt policy this section used to propose is not needed and is not being built.
 
-```
-mustPreempt = baseKind is video/youtube
-           && overlayKind is video/youtube
-           && !videoCompositingAvailable(currentVideoEl)
-```
+The test: a two-zone layout (`tpl-split-h`, 50/50) with a different mp4 in each zone, assigned to
+the player on that box, captured through the DWS native screenshot — which composites the hardware
+plane, so it sees what the panel shows rather than what the DOM knows.
 
-On preempt the base video element is torn down by the path `renderContent` already uses, the overlay
-takes the plane, and **the base playlist's timeline keeps running** — only the decode is yielded. On
-clear, `playCurrentItem()` (the existing #146 re-attach) resumes at whatever item the timeline
-reached. No new resume machinery, no restore step.
+A single frame cannot tell two live decoders from two first-frames painted and frozen, so two
+captures 96 seconds apart were compared half by half. Both sides advanced, independently:
 
-⚠️ **The policy is not fixed until it is tested on an XT245.** The original argument here was that
-multi-zone layouts already put several simultaneous `<video>` elements on screen and that path ships,
-so concurrent decode must work. **That argument does not hold.** `brightsign/README.md` declares
-`playback.zones` *"always | properties of the renderer, not the hardware"* — the capability is
-claimed unconditionally and explicitly disclaims saying anything about the decoder. Nobody has
-verified multi-video zones on this hardware; the declaration sidesteps the question rather than
-answering it.
+| | 10:12:01 | 10:13:37 |
+|---|---|---|
+| left | *"Twenty phones were the last of the run…"* | *"To flash us the sixty, every one!"* |
+| right | *"Welcome to the search results…"* | *"Boot failure, Secure Boot violation detected"* |
 
-That makes preemption **more** likely to be needed, not less — and raises a second possibility worth
-separating from this feature: if concurrent decode does not work on an XT245, then **multi-video zone
-layouts are already broken there today** and this design merely happens to be the first thing that
-looks. If the test shows that, it is a bug report about zones, not a trigger decision.
+Mean per-pixel delta between frames: left 18.3, right 4.6 — neither zero, and the burned-in lyrics
+put the two clips at unmistakably different playback positions.
 
-**The test CAN run on the XT245 as it stands** — an earlier draft of this document said it could not,
-and that was wrong. Since #290 (*"Show the player on the player"*) `node-server.html` embeds the
-player in a full-screen iframe above the diagnostics whenever the server is up and an account exists.
-So a server-mode box is also a playing box. The device registered to it reporting
-`platform: "Chrome 148"` is the widget's own Chromium user agent, not a separate browser client.
+**Three things this settles:**
 
-Testing therefore needs only a two-video layout assigned to that device on its own local server. No
-reconfiguration, no loss of the mesh-child role.
+1. **The overlay composites over base video.** No preemption, no base teardown, no `playCurrentItem()`
+   resume path, and §7's held-set logic gets simpler for it.
+2. **Multi-video zone layouts are NOT broken on BrightSign.** That was the live alternative
+   hypothesis and it is dead; there is no zones bug to file.
+3. **A hardware video plane composites through an IFRAME.** On a server-mode box the player runs
+   inside one (`node-server.html` since #290), which was a second unknown stacked on the first. Both
+   videos rendered correctly through that boundary.
 
-⚠️ One wrinkle that makes the result *more* interesting, not less: on a server-mode box the player
-runs **inside an iframe**. Whether a hardware video plane composites correctly through an iframe
-boundary is a second unknown stacked on the first, and it applies to the base playlist today — not
-just to triggers. If the test surfaces something, separate the two questions before blaming either.
+`videoCompositingAvailable()` stays where it is and keeps doing its existing job for transitions. It
+is simply not wired to a preemption decision, because there is nothing to decide.
 
-Testing in desktop Chrome proves nothing either way: `videoCompositingAvailable()` returns true
-there, which is the opposite of the platform under test.
-
-Also note `videoCompositingAvailable` literally answers "can a canvas read these pixels", a *proxy*
-for the hardware plane. It is the right proxy on every platform we ship, but it is one.
+⚠️ **Scope of the claim, so nobody over-reads it:** one model (XT245, Series 5 "cobra"), one
+firmware, two 1080p-class clips, node-enabled widget. It does not establish a decoder budget. A
+four-zone all-video layout, or 4K sources, are separate questions this test does not answer — and if
+one of those fails, the answer is a documented zone budget, not a trigger-specific preempt path.
 
 ### 10. Two flags, both default OFF
 
@@ -374,7 +363,5 @@ that fires and shows nothing.
 5. UDP transport on one socket, membership and rejoin, behind its flag.
 6. Priority, held set, lease, and the collision rules.
 7. Observability counters, the capability probe, and the loopback self-test.
-8. The XT245 concurrent-decode test, then §9's preempt policy.
-
-⚠️ Step 8 is listed last but **runs first** — the answer can change step 6's rendering, and it is the
-one open question that is a design decision rather than an implementation detail.
+8. ~~The XT245 concurrent-decode test, then §9's preempt policy.~~ **Done 2026-08-22** — decodes
+   compose, no preempt path to build. See §9.
