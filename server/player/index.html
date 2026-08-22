@@ -2071,9 +2071,21 @@
      * the lease are step 6 — until then a fire is last-wins, which is the same rule the manual PiP
      * path has always used, so the behaviour is at least consistent rather than half a policy.
      */
-    let triggerActive = null;                 // { trigger, mode, since, source }
+    let triggerActive = null;                 // { trigger, mode, since, source, leaseUntil }
     let triggerTimers = {};                   // its OWN store — clearZoneTimers() must not reach it
     let triggerCapTimer = null;
+    /*
+     * ⚠️ HELD, NOT STACKED. Only `until_cleared` triggers survive being preempted, because they are
+     * assertions about the world that nobody has retracted — "room occupied" is still true while
+     * "evacuate" covers it. A preempted `once` is NOT held: its moment has passed, and showing it
+     * later would put stale content on a screen at a time nobody chose.
+     *
+     * That distinction is what stops this being an interrupt stack. A stack accumulates expired
+     * one-shots and needs eviction rules nobody gets right; this holds only the things that are
+     * still true and drops them the moment they stop being true (cleared, or lease expired).
+     */
+    let triggerHeld = [];                     // [{ trigger, source, leaseUntil }]
+    let triggerLeaseTimer = null;
     const triggerStats = {
       received: 0, accepted: 0,
       rejected: { bad_magic: 0, malformed: 0, bad_secret: 0, unknown_token: 0, too_large: 0, rate_limited: 0 },
@@ -2100,6 +2112,58 @@
       } catch (e) {}
     }
 
+    /** When this trigger's hold lapses if nobody re-asserts it. null = hold indefinitely. */
+    function triggerLeaseUntil(trigger) {
+      const secs = Number(trigger && trigger.lease_sec);
+      return Number.isFinite(secs) && secs > 0 ? Date.now() + secs * 1000 : null;
+    }
+
+    /*
+     * ⚠️ THE LEASE TICKS WHILE A TRIGGER IS HELD, not only while it is on screen.
+     *
+     * The lease answers "is this condition still true", which is a question about the world, not
+     * about the display. A held trigger whose sender stopped talking has stopped being true, and if
+     * it were allowed to survive on the held list it would pop back the moment the higher-priority
+     * overlay cleared — reasserting a condition that lapsed minutes ago. So the sweep covers both.
+     */
+    function triggerLeaseSweep() {
+      const now = Date.now();
+      if (triggerActive && triggerActive.leaseUntil && now > triggerActive.leaseUntil) {
+        const name = triggerActive.trigger.name;
+        triggerStop('lease expired');
+        triggerLog('warn', `lease expired, auto-cleared "${name}"`);
+        triggerPromote();
+        return;
+      }
+      const before = triggerHeld.length;
+      triggerHeld = triggerHeld.filter((h) => !(h.leaseUntil && now > h.leaseUntil));
+      if (triggerHeld.length !== before) {
+        triggerLog('info', `${before - triggerHeld.length} held trigger(s) lapsed and were dropped`);
+      }
+    }
+
+    /*
+     * Bring back the highest-priority thing that is still true.
+     *
+     * ⚠️ It restarts at item 1 rather than resuming a position. A held trigger is a state assertion,
+     * not a paused timeline: if "evacuate" was authored with the exit map first, resuming at item 4
+     * makes the first three unreachable for as long as the preemption lasted. Resuming would also
+     * mean per-trigger playback state surviving preemption — state that leaks, and that nobody
+     * notices is wrong.
+     */
+    function triggerPromote() {
+      if (triggerActive || !triggerHeld.length) return;
+      // Highest priority; ties to the most recently held, which matches the last-arrival tie-break
+      // used everywhere else in this handler.
+      let best = 0;
+      for (let i = 1; i < triggerHeld.length; i++) {
+        if ((triggerHeld[i].trigger.priority || 0) >= (triggerHeld[best].trigger.priority || 0)) best = i;
+      }
+      const h = triggerHeld.splice(best, 1)[0];
+      triggerLog('info', `restoring held "${h.trigger.name}" (still asserted)`);
+      triggerFire(h.trigger, h.source, h.leaseUntil);
+    }
+
     function triggerStop(reason) {
       try { if (triggerCapTimer) clearTimeout(triggerCapTimer); } catch (e) {}
       triggerCapTimer = null;
@@ -2123,7 +2187,7 @@
      * ⚠️ It composites over base video rather than preempting it. Verified on an XT245 (BOS 10.0.16)
      * on 2026-08-22: two simultaneous decodes, both advancing, both composited. See §9.
      */
-    function triggerFire(trigger, source) {
+    function triggerFire(trigger, source, carriedLease) {
       const container = document.getElementById('pipContainer');
       if (!container) return;
       const items = Array.isArray(trigger.items) ? trigger.items : [];
@@ -2139,7 +2203,16 @@
       box.style.cssText = 'position:absolute;inset:0;background:#000;overflow:hidden;';
       container.appendChild(box);
 
-      triggerActive = { trigger, mode: trigger.mode, since: Date.now(), source };
+      triggerActive = {
+        trigger, mode: trigger.mode, since: Date.now(), source,
+        // A restored trigger keeps the lease it had — being covered for a while is not a renewal,
+        // and resetting the clock would let a preemption silently extend a lapsed assertion.
+        leaseUntil: carriedLease !== undefined ? carriedLease : triggerLeaseUntil(trigger),
+      };
+      if (!triggerLeaseTimer) {
+        triggerLeaseTimer = setInterval(triggerLeaseSweep, 5000);
+        if (triggerLeaseTimer && triggerLeaseTimer.unref) triggerLeaseTimer.unref();
+      }
       showZoneItem({ id: '__trigger__' }, box, items, 0, triggerTimers);
 
       /*
@@ -2149,10 +2222,28 @@
        * because a safety valve that defers to the thing it is guarding is not a safety valve.
        */
       const cap = Number(trigger.max_duration_sec) || 0;
-      if (trigger.mode === 'once' && cap > 0) {
-        const need = items.reduce((n, i) => n + (Number(i.duration_sec) || 10), 0);
-        if (need > cap) triggerLog('warn', `"${trigger.name}" capped at ${cap}s (playlist needs ${need}s)`);
-        triggerCapTimer = setTimeout(() => triggerStop('cap reached'), cap * 1000);
+      if (trigger.mode === 'once') {
+        /*
+         * ⚠️ `once` NEEDS AN EXPLICIT STOP. showZoneItem rotates forever — that is right for a zone
+         * and wrong here, so without this a "play once" trigger would loop until something cleared
+         * it, which is the behaviour of the other mode entirely.
+         *
+         * ⚠️ The natural length is ESTIMATED from duration_sec, and for video that is a guess: a
+         * video item advances on `ended`, so its real length is whatever the file is, not what the
+         * field says. A clip longer than its duration_sec is cut short; a shorter one leaves the
+         * last frame up until the estimate elapses. Stated rather than hidden — making it exact
+         * needs the rotation engine to report a wrap, which is a change to a path the base playlist
+         * shares and not worth the blast radius here.
+         */
+        const natural = items.reduce((n, i) => n + (Number(i.duration_sec) || 10), 0);
+        const stopAfter = cap > 0 ? Math.min(cap, natural) : natural;
+        if (cap > 0 && natural > cap) {
+          triggerLog('warn', `"${trigger.name}" capped at ${cap}s (playlist needs ${natural}s)`);
+        }
+        triggerCapTimer = setTimeout(() => {
+          triggerStop(cap > 0 && cap <= natural ? 'cap reached' : 'played once');
+          triggerPromote();
+        }, stopAfter * 1000);
       }
       triggerLog('info', `fired "${trigger.name}" via ${source} (${trigger.mode}, ${items.length} item(s))`);
     }
@@ -2189,23 +2280,74 @@
       }
 
       triggerStats.accepted++;
-      if (verdict.action === 'clear_all') triggerStop('clear-all');
-      else if (verdict.action === 'clear') {
-        if (triggerActive && triggerActive.trigger.id === verdict.trigger.id) triggerStop('cleared');
-        else triggerLog('info', `clear for "${verdict.trigger.name}" but it is not showing`);
-      } else if (verdict.action === 'fire') {
-        /*
-         * ⚠️ A RE-FIRE OF THE ALREADY-ACTIVE TRIGGER IS A NO-OP, NOT A RESTART. Crestron and PLC
-         * gear re-assert state on a timer, and subnet broadcast duplicates packets anyway. If every
-         * repeat restarted the overlay, a sender re-asserting every 5s would freeze a 6-item
-         * emergency loop on item 1 forever — and it would look like the playlist was broken rather
-         * than like the sender was chatty. (Step 6: this is also where the lease renews.)
-         */
+      if (verdict.action === 'clear_all') {
+        // ⚠️ Clear-all empties the held set too. "Stop everything" that leaves something queued to
+        // reappear a moment later is not stop everything.
+        triggerHeld = [];
+        triggerStop('clear-all');
+      } else if (verdict.action === 'clear') {
         if (triggerActive && triggerActive.trigger.id === verdict.trigger.id) {
-          triggerLog('info', `re-fire of "${verdict.trigger.name}" — already showing, not restarted`,
-                     're-fire-' + verdict.trigger.id);
+          triggerStop('cleared');
+          triggerPromote();
         } else {
-          triggerFire(verdict.trigger, source);
+          // Clearing something that is HELD must remove it, or it comes back when the overlay
+          // above it clears — after the operator already told it to stop.
+          const before = triggerHeld.length;
+          triggerHeld = triggerHeld.filter((h) => h.trigger.id !== verdict.trigger.id);
+          triggerLog('info', triggerHeld.length !== before
+            ? `cleared held "${verdict.trigger.name}"`
+            : `clear for "${verdict.trigger.name}" but it is not showing or held`);
+        }
+      } else if (verdict.action === 'fire') {
+        const incoming = verdict.trigger;
+        /*
+         * ⚠️ A RE-FIRE OF THE ALREADY-ACTIVE TRIGGER IS A NO-OP, NOT A RESTART — but it DOES renew
+         * the lease. Crestron and PLC gear re-assert state on a timer, and subnet broadcast
+         * duplicates packets anyway. If every repeat restarted the overlay, a sender re-asserting
+         * every 5s would freeze a 6-item emergency loop on item 1 forever, and it would look like
+         * the playlist was broken rather than like the sender was chatty.
+         *
+         * The same repeat is the liveness signal the lease is built on, so one mechanism does two
+         * jobs: the chatty sender stops being a nuisance and becomes the proof the alarm is real.
+         */
+        if (triggerActive && triggerActive.trigger.id === incoming.id) {
+          triggerActive.leaseUntil = triggerLeaseUntil(incoming);
+          triggerLog('info', `re-fire of "${incoming.name}" — already showing, lease renewed`,
+                     're-fire-' + incoming.id);
+        } else {
+          const held = triggerHeld.find((h) => h.trigger.id === incoming.id);
+          if (held) {
+            /*
+             * ⚠️ A RE-ASSERTION OF A HELD TRIGGER RENEWS IT WITHOUT DISTURBING THE SCREEN. Without
+             * this, an alarm that stays true while a higher-priority overlay covers it would have
+             * its lease quietly lapse — and would then NOT come back when the higher one cleared,
+             * even though its sender never stopped saying it was true.
+             */
+            held.leaseUntil = triggerLeaseUntil(incoming);
+            triggerLog('info', `held "${incoming.name}" re-asserted, lease renewed`, 'held-' + incoming.id);
+          } else if (triggerActive && (incoming.priority || 0) < (triggerActive.trigger.priority || 0)) {
+            // Lower priority while something more important is showing: dropped, and named on BOTH
+            // sides, because "my trigger did nothing" is unanswerable without knowing what beat it.
+            triggerLog('info',
+              `"${incoming.name}" (p${incoming.priority || 0}) dropped — "${triggerActive.trigger.name}" ` +
+              `(p${triggerActive.trigger.priority || 0}) is showing`, 'lost-' + incoming.id);
+          } else {
+            /*
+             * Equal or higher priority takes the screen. Ties go to the last arrival, matching the
+             * last-show-wins rule the manual PiP path has always used, so the triggered and manual
+             * paths cannot disagree about what happens.
+             */
+            if (triggerActive && triggerActive.mode === 'until_cleared') {
+              triggerHeld.push({
+                trigger: triggerActive.trigger,
+                source: triggerActive.source,
+                leaseUntil: triggerActive.leaseUntil,
+              });
+              triggerLog('info',
+                `"${triggerActive.trigger.name}" held while "${incoming.name}" shows`);
+            }
+            triggerFire(incoming, source);
+          }
         }
       }
       return verdict;

@@ -178,10 +178,21 @@ test('the trigger rotation owns its timers, so a layout change cannot freeze it'
 });
 
 test('⚠️ a re-fire of the already-active trigger does not restart it', () => {
-  // PLC and Crestron gear re-assert on a timer; broadcast duplicates packets. A restart per repeat
-  // would freeze a multi-item emergency loop on item 1 for as long as the sender keeps talking.
-  const h = PLAYER.slice(PLAYER.indexOf('function handleTrigger'), PLAYER.indexOf('function startTriggerHttp'));
-  assert.match(h, /already showing, not restarted/);
+  /*
+   * PLC and Crestron gear re-assert on a timer; broadcast duplicates packets. A restart per repeat
+   * would freeze a multi-item emergency loop on item 1 for as long as the sender keeps talking.
+   *
+   * ⚠️ Asserted on the STRUCTURE, not the log wording — an earlier version matched the exact phrase
+   * and broke the moment step 6 made the same branch renew the lease, which was a test failing for
+   * a change that was entirely correct. The durable claim is that the branch exists and does not
+   * call triggerFire; the behaviour itself is covered by triggers-fire-path and
+   * triggers-priority-lease, which execute it.
+   */
+  const h = PLAYER.slice(PLAYER.indexOf('function handleTrigger'), PLAYER.indexOf('function startTriggerUdp'));
+  const branch = h.slice(h.indexOf('if (triggerActive && triggerActive.trigger.id === incoming.id)'));
+  const body = branch.slice(0, branch.indexOf('} else {'));
+  assert.ok(body.length > 0, 'the already-active branch is gone');
+  assert.doesNotMatch(body, /triggerFire\(/, 'a repeat re-renders, restarting the overlay at item 1');
 });
 
 test('⚠️ broadcast noise is not logged per packet', () => {
