@@ -211,11 +211,26 @@ takes the plane, and **the base playlist's timeline keeps running** — only the
 clear, `playCurrentItem()` (the existing #146 re-attach) resumes at whatever item the timeline
 reached. No new resume machinery, no restore step.
 
-⚠️ **The policy is not fixed until it is tested on an XT245**, for a specific reason: multi-zone
-layouts *already* put several simultaneous `<video>` elements on screen and that path ships today. So
-either the XT245 handles concurrent decodes — in which case compositing is right and preemption is
-complexity for nothing — or multi-video zone layouts are already broken there and nobody has hit it.
-Both are worth knowing. The detection is ready either way.
+⚠️ **The policy is not fixed until it is tested on an XT245.** The original argument here was that
+multi-zone layouts already put several simultaneous `<video>` elements on screen and that path ships,
+so concurrent decode must work. **That argument does not hold.** `brightsign/README.md` declares
+`playback.zones` *"always | properties of the renderer, not the hardware"* — the capability is
+claimed unconditionally and explicitly disclaims saying anything about the decoder. Nobody has
+verified multi-video zones on this hardware; the declaration sidesteps the question rather than
+answering it.
+
+That makes preemption **more** likely to be needed, not less — and raises a second possibility worth
+separating from this feature: if concurrent decode does not work on an XT245, then **multi-video zone
+layouts are already broken there today** and this design merely happens to be the first thing that
+looks. If the test shows that, it is a bug report about zones, not a trigger decision.
+
+⚠️ **The test cannot run on the XT245 as currently configured.** That box is in server mode
+(`st-config.json {"server":1}`); its widget shows the server diagnostic page and the only device
+registered to it reports `platform: "Chrome 148"` — a browser client. It is not running the player,
+so there is nothing on it to put two videos into. Testing needs the box temporarily flipped to player
+mode with a two-video layout assigned, which takes it out of the mesh-child role it currently holds.
+Testing in Chrome instead proves nothing: `videoCompositingAvailable()` returns true there, which is
+the opposite of the platform under test.
 
 Also note `videoCompositingAvailable` literally answers "can a canvas read these pixels", a *proxy*
 for the hardware plane. It is the right proxy on every platform we ship, but it is one.
