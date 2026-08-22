@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.0.0-alpha3
+
+One fix, and it is the one that makes the previous two releases reach a player at all.
+
+### Fixed — a BrightSign player's launcher could never be updated
+
+The server package installs onto the player and replaces the whole server tree. The small launcher
+that boots it sits beside that tree, and the installer updated it by copying the new copy up itself.
+
+On real hardware that copy silently did nothing. The package installed, the server ran, the version
+number changed — and the launcher stayed exactly as it was when the player was first set up. The
+only record of the failure went somewhere unreachable from the device, so nothing anywhere said so.
+
+⚠️ **Every launcher fix so far was affected**, including the 24-hour update check added in
+2.0.0-alpha2, which exists precisely so a running player does not need someone to power-cycle it.
+Until this release, that check could not have arrived on any player in the field.
+
+The launcher now travels at the top level of the package and is installed by the same mechanism that
+places its other 9,630 files. A package built before this change cannot update a launcher, and the
+install log now says so rather than leaving no trace.
+
+**If you have a player on 2.0.0-alpha0, alpha1 or alpha2, it needs one more manual reboot to take
+this release.** After that its launcher updates with every package, and the 24-hour check takes over.
+
+### Known limits
+
+Unchanged from 2.0.0-alpha0 — read-only, two tiers, no content/schedules/widgets/layouts across a
+link, and both sides on 2.0.0 or newer. See that entry.
+
 ## 2.0.0-alpha2
 
 Everything here came out of watching a real BrightSign take the previous release, rather than from
